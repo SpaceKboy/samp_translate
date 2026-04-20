@@ -2,12 +2,11 @@
 SAMP Translate — ponto de entrada principal.
 
 Fluxo:
-    1. Abre SelectorDialog → usuário escolhe a janela do GTA/SA-MP
-    2. Conecta o SampChatReader ao processo gta_sa.exe
-    3. Exibe o painel principal (chat log + status)
-    4. Inicia o WindowOverlay sobre a janela selecionada
-    5. Thread de fundo lê o chat e envia mensagens para a fila
-    6. Loop tkinter drena a fila e atualiza a UI
+    1. Abre ControlPanel (menu externo compacto, always-on-top)
+    2. Usuário clica em "Selecionar janela GTA" → SelectorDialog
+    3. Inicia ChatOverlay sobreposto ao GTA (Toplevel transparente)
+    4. Thread de fundo lê o chat SA-MP → queue.Queue
+    5. Loop tkinter drena a fila → ChatOverlay.add_message()
 """
 
 import os
@@ -16,7 +15,6 @@ import queue
 import threading
 import time
 
-# ── fix Tcl/Tk para venvs ───────────────────────────────────────────────────
 def _fix_tcl_paths() -> None:
     base = getattr(sys, "base_prefix", sys.prefix)
     tcl = os.path.join(base, "tcl", "tcl8.6")
@@ -28,126 +26,574 @@ def _fix_tcl_paths() -> None:
 _fix_tcl_paths()
 
 import tkinter as tk
-from tkinter import ttk
 import win32gui
 
-from window_overlay import SelectorDialog, WindowOverlay
+from window_overlay import SelectorDialog, ChatOverlay, get_window_rect
 from samp_chat import SampChatReader, ChatMessage
 
-# ── Paleta / UI ─────────────────────────────────────────────────────────────
+# ── Paleta ───────────────────────────────────────────────────────────────────
 
-BG        = "#1a1a2e"
-BG_PANEL  = "#16213e"
-BG_LOG    = "#0f3460"
-FG        = "#e0e0e0"
-FG_DIM    = "#888888"
-ACCENT    = "#00FF00"
-FONT_UI   = ("Segoe UI", 9)
-FONT_LOG  = ("Consolas", 9)
+BG       = "#1a1a2e"
+BG_PANEL = "#16213e"
+FG       = "#e0e0e0"
+FG_DIM   = "#888888"
+ACCENT   = "#00FF00"
+FONT_UI  = ("Segoe UI", 9)
 
-POLL_INTERVAL_MS = 200   # frequência de drenagem da fila na UI
+POLL_INTERVAL_MS = 200
 
 
-# ── App principal ────────────────────────────────────────────────────────────
+# ── Diálogo de posição do chat ───────────────────────────────────────────────
 
-class App:
+class ChatPositionDialog:
+    STEP = 5  # pixels por clique de seta
+
+    def __init__(self, master: tk.Misc, overlay: ChatOverlay, hwnd: int):
+        self._overlay = overlay
+        self._hwnd = hwnd
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Posição do chat")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+
+        # Inicializa com posição atual (usa altura da janela do GTA se disponível)
+        rect = get_window_rect(hwnd)
+        h = rect[3] if rect else 600
+        x, y = overlay.get_position(h)
+
+        self._x = tk.IntVar(value=x)
+        self._y = tk.IntVar(value=y)
+
+        self._build_ui()
+        self.root.grab_set()
+
+    def _build_ui(self) -> None:
+        # coordenadas
+        coords = tk.Frame(self.root, bg=BG, padx=14, pady=10)
+        coords.pack(fill="x")
+
+        tk.Label(coords, text="X:", bg=BG, fg=FG, font=FONT_UI).grid(row=0, column=0, sticky="w")
+        tk.Spinbox(
+            coords, from_=0, to=9999, textvariable=self._x, width=6,
+            command=self._apply, bg=BG_PANEL, fg=FG, relief="flat",
+            buttonbackground=BG_PANEL,
+        ).grid(row=0, column=1, padx=(4, 20))
+
+        tk.Label(coords, text="Y:", bg=BG, fg=FG, font=FONT_UI).grid(row=0, column=2, sticky="w")
+        tk.Spinbox(
+            coords, from_=0, to=9999, textvariable=self._y, width=6,
+            command=self._apply, bg=BG_PANEL, fg=FG, relief="flat",
+            buttonbackground=BG_PANEL,
+        ).grid(row=0, column=3, padx=(4, 0))
+
+        # d-pad
+        dpad = tk.Frame(self.root, bg=BG, pady=6)
+        dpad.pack()
+
+        _btn = dict(
+            bg=BG_PANEL, fg=FG, relief="flat", width=3,
+            font=("Segoe UI", 13), cursor="hand2",
+            activebackground=ACCENT, activeforeground="#000",
+        )
+        tk.Button(dpad, text="↑", command=self._move_up,    **_btn).grid(row=0, column=1, padx=3, pady=3)
+        tk.Button(dpad, text="←", command=self._move_left,  **_btn).grid(row=1, column=0, padx=3, pady=3)
+        tk.Label( dpad, text="·", bg=BG, fg=FG_DIM, font=("Segoe UI", 13), width=3, anchor="center").grid(row=1, column=1)
+        tk.Button(dpad, text="→", command=self._move_right, **_btn).grid(row=1, column=2, padx=3, pady=3)
+        tk.Button(dpad, text="↓", command=self._move_down,  **_btn).grid(row=2, column=1, padx=3, pady=3)
+
+        # fechar
+        tk.Button(
+            self.root, text="Fechar", command=self.root.destroy,
+            bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2",
+        ).pack(pady=(2, 10))
+
+    def _apply(self) -> None:
+        self._overlay.set_position(self._x.get(), self._y.get())
+
+    def _move_up(self)    -> None: self._y.set(max(0, self._y.get() - self.STEP)); self._apply()
+    def _move_down(self)  -> None: self._y.set(self._y.get() + self.STEP);         self._apply()
+    def _move_left(self)  -> None: self._x.set(max(0, self._x.get() - self.STEP)); self._apply()
+    def _move_right(self) -> None: self._x.set(self._x.get() + self.STEP);         self._apply()
+
+
+# ── Diálogo de estilo do chat ────────────────────────────────────────────────
+
+FONTS_AVAILABLE = ["Arial", "Consolas", "Courier New", "Impact", "Segoe UI",
+                   "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana"]
+
+class ChatStyleDialog:
+    def __init__(self, master: tk.Misc, overlay: ChatOverlay):
+        self._overlay = overlay
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Editar chat")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+
+        family, size, color = overlay.get_style()
+        self._font_var  = tk.StringVar(value=family)
+        self._size_var  = tk.IntVar(value=size)
+        self._color_var = tk.StringVar(value=color)
+        self._lines_var = tk.IntVar(value=overlay.get_max_messages())
+
+        self._build_ui()
+        self.root.grab_set()
+
+    def _build_ui(self) -> None:
+        pad = dict(padx=14, pady=6)
+
+        # fonte
+        row_font = tk.Frame(self.root, bg=BG, **pad)
+        row_font.pack(fill="x")
+        tk.Label(row_font, text="Fonte:", bg=BG, fg=FG, font=FONT_UI, width=8, anchor="w").pack(side="left")
+        font_menu = tk.OptionMenu(row_font, self._font_var, *FONTS_AVAILABLE)
+        font_menu.config(bg=BG_PANEL, fg=FG, relief="flat", activebackground=ACCENT,
+                         activeforeground="#000", highlightthickness=0)
+        font_menu["menu"].config(bg=BG_PANEL, fg=FG)
+        font_menu.pack(side="left", fill="x", expand=True)
+
+        # tamanho
+        row_size = tk.Frame(self.root, bg=BG, **pad)
+        row_size.pack(fill="x")
+        tk.Label(row_size, text="Tamanho:", bg=BG, fg=FG, font=FONT_UI, width=8, anchor="w").pack(side="left")
+        tk.Spinbox(
+            row_size, from_=6, to=48, textvariable=self._size_var, width=5,
+            bg=BG_PANEL, fg=FG, relief="flat", buttonbackground=BG_PANEL,
+        ).pack(side="left")
+
+        # quantidade de linhas
+        row_lines = tk.Frame(self.root, bg=BG, **pad)
+        row_lines.pack(fill="x")
+        tk.Label(row_lines, text="Linhas:", bg=BG, fg=FG, font=FONT_UI, width=8, anchor="w").pack(side="left")
+        tk.Spinbox(
+            row_lines, from_=1, to=30, textvariable=self._lines_var, width=5,
+            bg=BG_PANEL, fg=FG, relief="flat", buttonbackground=BG_PANEL,
+        ).pack(side="left")
+
+        # cor
+        row_color = tk.Frame(self.root, bg=BG, **pad)
+        row_color.pack(fill="x")
+        tk.Label(row_color, text="Cor (hex):", bg=BG, fg=FG, font=FONT_UI, width=8, anchor="w").pack(side="left")
+        color_entry = tk.Entry(row_color, textvariable=self._color_var, width=10,
+                               bg=BG_PANEL, fg=FG, relief="flat", insertbackground=FG)
+        color_entry.pack(side="left")
+        self._color_preview = tk.Label(row_color, text="  ██  ", bg=BG, fg=self._color_var.get(),
+                                       font=("Segoe UI", 11))
+        self._color_preview.pack(side="left", padx=(8, 0))
+        self._color_var.trace_add("write", self._update_preview)
+
+        # botões
+        btn_row = tk.Frame(self.root, bg=BG, padx=14, pady=8)
+        btn_row.pack(fill="x")
+        tk.Button(
+            btn_row, text="Aplicar", command=self._apply,
+            bg=ACCENT, fg="#000", relief="flat", padx=12, pady=4, cursor="hand2",
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            btn_row, text="Fechar", command=self.root.destroy,
+            bg=BG_PANEL, fg=FG, relief="flat", padx=12, pady=4, cursor="hand2",
+        ).pack(side="left")
+
+    def _update_preview(self, *_) -> None:
+        try:
+            color = self._color_var.get()
+            self._color_preview.config(fg=color)
+        except Exception:
+            pass
+
+    def _apply(self) -> None:
+        try:
+            color = self._color_var.get()
+            self.root.winfo_rgb(color)  # valida a cor antes de aplicar
+        except Exception:
+            return
+        self._overlay.set_style(self._font_var.get(), self._size_var.get(), color)
+        self._overlay.set_max_messages(self._lines_var.get())
+
+
+# ── Diálogo de filtros ────────────────────────────────────────────────────────
+
+class AddFilterDialog:
+    """Janela pequena para criar um filtro personalizado."""
+
+    def __init__(self, master: tk.Misc, on_confirm):
+        self._on_confirm = on_confirm
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Adicionar filtro")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+
+        self._build_ui()
+        self.root.grab_set()
+
+    def _build_ui(self) -> None:
+        pad = dict(padx=14, pady=6)
+
+        tk.Label(self.root, text="Adicionar filtro", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
+
+        row_name = tk.Frame(self.root, bg=BG, **pad)
+        row_name.pack(fill="x")
+        tk.Label(row_name, text="Nome:", bg=BG, fg=FG, font=FONT_UI, width=12, anchor="w").pack(side="left")
+        self._name_var = tk.StringVar()
+        tk.Entry(row_name, textvariable=self._name_var, width=22,
+                 bg=BG_PANEL, fg=FG, relief="flat", insertbackground=FG).pack(side="left")
+
+        row_kw = tk.Frame(self.root, bg=BG, **pad)
+        row_kw.pack(fill="x")
+        tk.Label(row_kw, text="Palavra-chave:", bg=BG, fg=FG, font=FONT_UI, width=12, anchor="w").pack(side="left")
+        self._kw_var = tk.StringVar()
+        tk.Entry(row_kw, textvariable=self._kw_var, width=22,
+                 bg=BG_PANEL, fg=FG, relief="flat", insertbackground=FG).pack(side="left")
+
+        btn_row = tk.Frame(self.root, bg=BG, padx=14, pady=8)
+        btn_row.pack(fill="x")
+        tk.Button(btn_row, text="Adicionar", command=self._confirm,
+                  bg=ACCENT, fg="#000", relief="flat", padx=12, pady=4, cursor="hand2").pack(side="left", padx=(0, 6))
+        tk.Button(btn_row, text="Cancelar", command=self.root.destroy,
+                  bg=BG_PANEL, fg=FG, relief="flat", padx=12, pady=4, cursor="hand2").pack(side="left")
+
+    def _confirm(self) -> None:
+        name = self._name_var.get().strip()
+        keyword = self._kw_var.get().strip()
+        if name and keyword:
+            self._on_confirm(name, keyword)
+            self.root.destroy()
+
+
+class FiltersDialog:
+    """Janela para ativar/desativar e criar filtros de mensagens do chat."""
+
+    def __init__(self, master: tk.Misc, filters: list[dict], overlay: ChatOverlay | None):
+        self._filters = filters
+        self._overlay = overlay
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Filtros")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        tk.Label(
+            self.root, text="Filtros de chat", bg=BG, fg=ACCENT,
+            font=("Segoe UI", 11, "bold"), padx=14, pady=10,
+        ).pack(anchor="w")
+
+        tk.Label(
+            self.root,
+            text="Filtros ativos mostram apenas mensagens com a palavra-chave.",
+            bg=BG, fg=FG_DIM, font=("Segoe UI", 8), padx=14,
+        ).pack(anchor="w")
+
+        tk.Frame(self.root, bg=BG_PANEL, height=1).pack(fill="x", padx=14, pady=6)
+
+        self._list_frame = tk.Frame(self.root, bg=BG, padx=14, pady=4)
+        self._list_frame.pack(fill="x")
+        self._render_filters()
+
+        tk.Frame(self.root, bg=BG_PANEL, height=1).pack(fill="x", padx=14, pady=6)
+
+        bottom = tk.Frame(self.root, bg=BG, padx=14, pady=4)
+        bottom.pack(fill="x")
+        tk.Button(bottom, text="+ Adicionar filtro", command=self._open_add_filter,
+                  bg=BG_PANEL, fg=ACCENT, relief="flat", padx=10, pady=4, cursor="hand2",
+                  activebackground=ACCENT, activeforeground="#000").pack(side="left")
+        tk.Button(bottom, text="Fechar", command=self.root.destroy,
+                  bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2").pack(side="right")
+
+        self.root.update_idletasks()
+
+    def _render_filters(self) -> None:
+        for w in self._list_frame.winfo_children():
+            w.destroy()
+
+        for f in self._filters:
+            row = tk.Frame(self._list_frame, bg=BG_PANEL, padx=10, pady=8)
+            row.pack(fill="x", pady=(0, 6))
+
+            f["var"].trace_add("write", lambda *_, v=f["var"]: self._on_toggle())
+
+            tk.Checkbutton(
+                row, text=f["name"],
+                variable=f["var"],
+                bg=BG_PANEL, fg=FG, selectcolor=BG,
+                activebackground=BG_PANEL, activeforeground=ACCENT,
+                font=FONT_UI, cursor="hand2",
+            ).pack(side="left")
+
+            tk.Label(
+                row, text=f'"{f["keyword"]}"',
+                bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 8),
+            ).pack(side="right")
+
+        if not self._filters:
+            tk.Label(self._list_frame, text="Nenhum filtro criado ainda.",
+                     bg=BG, fg=FG_DIM, font=FONT_UI).pack(pady=6)
+
+    def _on_toggle(self) -> None:
+        if self._overlay:
+            self._overlay.clear_messages()
+
+    def _open_add_filter(self) -> None:
+        AddFilterDialog(master=self.root, on_confirm=self._add_filter)
+
+    def _add_filter(self, name: str, keyword: str) -> None:
+        self._filters.append({
+            "name": name,
+            "keyword": keyword,
+            "var": tk.BooleanVar(value=False),
+        })
+        self._render_filters()
+        if self._overlay:
+            self._overlay.clear_messages()
+
+
+# ── Diálogo de nome do jogador ────────────────────────────────────────────────
+
+class PlayerNameDialog:
+    """Janela para o usuário inserir seu nome no jogo."""
+
+    def __init__(self, master: tk.Misc, current_name: str, on_confirm, on_cancel):
+        self._on_confirm = on_confirm
+        self._on_cancel  = on_cancel
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Adicione seu nome no jogo")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+        self.root.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        self._name_var = tk.StringVar(value=current_name)
+        self._build_ui()
+        self.root.grab_set()
+
+    def _build_ui(self) -> None:
+        tk.Label(self.root, text="Adicione seu nome no jogo", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
+
+        tk.Label(self.root,
+                 text="Mensagens que começarem com este nome serão ignoradas.",
+                 bg=BG, fg=FG_DIM, font=("Segoe UI", 8), padx=14).pack(anchor="w")
+
+        row = tk.Frame(self.root, bg=BG, padx=14, pady=10)
+        row.pack(fill="x")
+        tk.Label(row, text="Nome:", bg=BG, fg=FG, font=FONT_UI).pack(side="left", padx=(0, 6))
+        tk.Entry(row, textvariable=self._name_var, width=26,
+                 bg=BG_PANEL, fg=FG, relief="flat", insertbackground=FG).pack(side="left")
+
+        btn_row = tk.Frame(self.root, bg=BG, padx=14, pady=6)
+        btn_row.pack(fill="x")
+        tk.Button(btn_row, text="Confirmar", command=self._confirm,
+                  bg=ACCENT, fg="#000", relief="flat", padx=12, pady=4, cursor="hand2").pack(side="left", padx=(0, 6))
+        tk.Button(btn_row, text="Cancelar", command=self._cancel,
+                  bg=BG_PANEL, fg=FG, relief="flat", padx=12, pady=4, cursor="hand2").pack(side="left")
+
+    def _confirm(self) -> None:
+        name = self._name_var.get().strip()
+        if name:
+            self._on_confirm(name)
+            self.root.destroy()
+
+    def _cancel(self) -> None:
+        self._on_cancel()
+        self.root.destroy()
+
+
+# ── Menu Chat ────────────────────────────────────────────────────────────────
+
+class ChatMenuDialog:
+    """Janela de opções do chat — posição, estilo e 'me ignorar'."""
+
+    def __init__(self, master: tk.Misc, overlay: ChatOverlay, hwnd: int,
+                 ignore_self: dict, on_filter_change):
+        self._overlay          = overlay
+        self._hwnd             = hwnd
+        self._master           = master
+        self._ignore_self      = ignore_self
+        self._on_filter_change = on_filter_change
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Customizar chat")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        tk.Label(self.root, text="Customizar chat", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
+
+        btn_frame = tk.Frame(self.root, bg=BG, padx=14, pady=4)
+        btn_frame.pack(fill="x")
+
+        _btn = dict(relief="flat", padx=8, pady=6, cursor="hand2",
+                    activebackground=ACCENT, activeforeground="#000")
+
+        tk.Button(btn_frame, text="Posição do chat", command=self._open_position,
+                  bg=BG_PANEL, fg=FG, **_btn).pack(fill="x")
+
+        tk.Button(btn_frame, text="Editar chat", command=self._open_style,
+                  bg=BG_PANEL, fg=FG, **_btn).pack(fill="x", pady=(6, 0))
+
+        # separador
+        tk.Frame(self.root, bg=BG_PANEL, height=1).pack(fill="x", padx=14, pady=8)
+
+        # "Me ignorar"
+        ignore_frame = tk.Frame(self.root, bg=BG_PANEL, padx=10, pady=8)
+        ignore_frame.pack(fill="x", padx=14, pady=(0, 12))
+
+        tk.Checkbutton(
+            ignore_frame, text="Me ignorar",
+            variable=self._ignore_self["var"],
+            command=self._on_ignore_toggle,
+            bg=BG_PANEL, fg=FG, selectcolor=BG,
+            activebackground=BG_PANEL, activeforeground=ACCENT,
+            font=FONT_UI, cursor="hand2",
+        ).pack(side="left")
+
+        self._lbl_ignore_name = tk.Label(
+            ignore_frame,
+            text=self._ignore_self["name"] or "nenhum nome definido",
+            bg=BG_PANEL,
+            fg=ACCENT if self._ignore_self["name"] else FG_DIM,
+            font=("Segoe UI", 8),
+        )
+        self._lbl_ignore_name.pack(side="right")
+
+    def _on_ignore_toggle(self) -> None:
+        if self._ignore_self["var"].get():
+            # ligou: pede nome se ainda não tem
+            PlayerNameDialog(
+                master=self.root,
+                current_name=self._ignore_self["name"],
+                on_confirm=self._set_ignore_name,
+                on_cancel=self._cancel_ignore,
+            )
+        else:
+            # desligou
+            self._on_filter_change()
+
+    def _set_ignore_name(self, name: str) -> None:
+        self._ignore_self["name"] = name
+        self._lbl_ignore_name.config(text=name, fg=ACCENT)
+        self._on_filter_change()
+
+    def _cancel_ignore(self) -> None:
+        self._ignore_self["var"].set(False)
+
+    def _open_position(self) -> None:
+        ChatPositionDialog(master=self.root, overlay=self._overlay, hwnd=self._hwnd)
+
+    def _open_style(self) -> None:
+        ChatStyleDialog(master=self.root, overlay=self._overlay)
+
+
+# ── Painel de controle (menu externo) ────────────────────────────────────────
+
+class ControlPanel:
     def __init__(self):
         self._hwnd: int = 0
         self._chat_queue: queue.Queue[ChatMessage | None] = queue.Queue()
         self._reader = SampChatReader()
         self._reader_thread: threading.Thread | None = None
-        self._overlay: WindowOverlay | None = None
+        self._overlay: ChatOverlay | None = None
 
         self.root = tk.Tk()
         self.root.title("SAMP Translate")
         self.root.configure(bg=BG)
-        self.root.minsize(600, 400)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Filtros — cada entrada: name, keyword, var (BooleanVar)
+        self._filters: list[dict] = [
+            {"name": "Jogadores próximos", "keyword": "dice:", "var": tk.BooleanVar(value=False)},
+        ]
+        self._ignore_self: dict = {"var": tk.BooleanVar(value=False), "name": ""}
 
         self._build_ui()
 
-    # ── Construção da UI ─────────────────────────────────────────────────────
+    # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # ── cabeçalho ──
-        header = tk.Frame(self.root, bg=BG, pady=6)
-        header.pack(fill="x", padx=10)
+        # cabeçalho
+        header = tk.Frame(self.root, bg=BG, padx=12, pady=8)
+        header.pack(fill="x")
 
         tk.Label(
             header, text="SAMP Translate",
-            bg=BG, fg=ACCENT, font=("Segoe UI", 13, "bold"),
+            bg=BG, fg=ACCENT, font=("Segoe UI", 12, "bold"),
         ).pack(side="left")
 
-        self._btn_overlay = tk.Button(
-            header, text="Selecionar janela",
+        # painel de status
+        status = tk.Frame(self.root, bg=BG_PANEL, padx=12, pady=8)
+        status.pack(fill="x", padx=10, pady=(0, 6))
+
+        self._dot = tk.Label(
+            status, text="●", bg=BG_PANEL, fg="red", font=("Segoe UI", 10),
+        )
+        self._dot.grid(row=0, column=0, padx=(0, 5))
+
+        self._lbl_status = tk.Label(
+            status, text="Desconectado", bg=BG_PANEL, fg=FG, font=FONT_UI,
+        )
+        self._lbl_status.grid(row=0, column=1, sticky="w")
+
+        self._lbl_window = tk.Label(
+            status, text="Nenhuma janela selecionada",
+            bg=BG_PANEL, fg=FG_DIM, font=FONT_UI,
+        )
+        self._lbl_window.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        # botão de seleção
+        btn_frame = tk.Frame(self.root, bg=BG, padx=10, pady=8)
+        btn_frame.pack(fill="x")
+
+        tk.Button(
+            btn_frame, text="Selecionar janela GTA",
             command=self._select_window,
-            bg=BG_PANEL, fg=FG, relief="flat", padx=8, pady=3,
+            bg=BG_PANEL, fg=FG, relief="flat", padx=8, pady=6,
             activebackground=ACCENT, activeforeground="#000",
             cursor="hand2",
-        )
-        self._btn_overlay.pack(side="right")
+        ).pack(fill="x")
 
-        # ── status ──
-        status_frame = tk.Frame(self.root, bg=BG_PANEL, padx=10, pady=5)
-        status_frame.pack(fill="x", padx=10, pady=(0, 4))
-
-        tk.Label(status_frame, text="Janela:", bg=BG_PANEL, fg=FG_DIM, font=FONT_UI).grid(
-            row=0, column=0, sticky="w")
-        self._lbl_window = tk.Label(status_frame, text="—", bg=BG_PANEL, fg=FG, font=FONT_UI)
-        self._lbl_window.grid(row=0, column=1, sticky="w", padx=(4, 20))
-
-        tk.Label(status_frame, text="SA-MP:", bg=BG_PANEL, fg=FG_DIM, font=FONT_UI).grid(
-            row=0, column=2, sticky="w")
-        self._lbl_samp = tk.Label(status_frame, text="Desconectado", bg=BG_PANEL, fg="red", font=FONT_UI)
-        self._lbl_samp.grid(row=0, column=3, sticky="w", padx=4)
-
-        # ── log de chat ──
-        log_frame = tk.Frame(self.root, bg=BG)
-        log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 4))
-
-        tk.Label(log_frame, text="Chat", bg=BG, fg=FG_DIM, font=FONT_UI).pack(anchor="w")
-
-        text_frame = tk.Frame(log_frame, bg=BG_LOG)
-        text_frame.pack(fill="both", expand=True)
-
-        self._log = tk.Text(
-            text_frame,
-            bg=BG_LOG, fg=FG,
-            font=FONT_LOG,
-            state="disabled",
-            wrap="word",
-            relief="flat",
-            padx=6, pady=4,
-        )
-        sb = ttk.Scrollbar(text_frame, orient="vertical", command=self._log.yview)
-        self._log.configure(yscrollcommand=sb.set)
-        self._log.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-
-        # tags de cor para o log
-        self._log.tag_config("prefix", foreground="#f0c040", font=(*FONT_LOG, "bold"))
-        self._log.tag_config("info",   foreground="#80c8ff")
-        self._log.tag_config("dim",    foreground=FG_DIM)
-
-        # ── rodapé ──
-        footer = tk.Frame(self.root, bg=BG, pady=4)
-        footer.pack(fill="x", padx=10)
-
-        self._btn_clear = tk.Button(
-            footer, text="Limpar",
-            command=self._clear_log,
-            bg=BG_PANEL, fg=FG, relief="flat", padx=8, pady=2,
+        tk.Button(
+            btn_frame, text="Customizar chat",
+            command=self._open_chat_menu,
+            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
+            activebackground=ACCENT, activeforeground="#000",
             cursor="hand2",
-        )
-        self._btn_clear.pack(side="right")
+        ).pack(fill="x", pady=(4, 0))
 
-        self._lbl_count = tk.Label(footer, text="0 mensagens", bg=BG, fg=FG_DIM, font=FONT_UI)
-        self._lbl_count.pack(side="left")
+        tk.Button(
+            btn_frame, text="Filtros",
+            command=self._open_filters_dialog,
+            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
+            activebackground=ACCENT, activeforeground="#000",
+            cursor="hand2",
+        ).pack(fill="x", pady=(4, 0))
+
+        tk.Button(
+            btn_frame, text="Limpar chat",
+            command=self._clear_chat,
+            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
+            activebackground="#ff4444", activeforeground="#fff",
+            cursor="hand2",
+        ).pack(fill="x", pady=(4, 0))
 
     # ── Seleção de janela ─────────────────────────────────────────────────────
 
     def _select_window(self) -> None:
-        """Abre SelectorDialog; ao confirmar, inicia overlay e leitor de chat."""
         dialog = SelectorDialog(master=self.root)
         hwnd = dialog.selected_hwnd
         if hwnd is None:
@@ -155,7 +601,7 @@ class App:
 
         self._hwnd = hwnd
         title = win32gui.GetWindowText(hwnd)
-        self._lbl_window.config(text=f"{title}  (HWND={hwnd})")
+        self._lbl_window.config(text=title or f"HWND={hwnd}")
 
         self._start_overlay(hwnd)
         self._start_reader()
@@ -165,29 +611,24 @@ class App:
     def _start_overlay(self, hwnd: int) -> None:
         if self._overlay is not None:
             self._overlay.stop()
-
-        self._overlay = WindowOverlay(hwnd, master=self.root)
+        self._overlay = ChatOverlay(hwnd, master=self.root)
 
     # ── Leitor de chat (thread) ───────────────────────────────────────────────
 
     def _start_reader(self) -> None:
         if self._reader_thread and self._reader_thread.is_alive():
             return
-
         self._reader_thread = threading.Thread(
-            target=self._reader_loop, daemon=True, name="samp-chat-reader"
+            target=self._reader_loop, daemon=True, name="samp-chat-reader",
         )
         self._reader_thread.start()
         self.root.after(POLL_INTERVAL_MS, self._drain_queue)
 
     def _reader_loop(self) -> None:
-        """Roda na thread de fundo: conecta e publica mensagens na fila."""
-        # Tenta conectar em loop (o jogador pode abrir o jogo depois)
         while True:
             try:
                 self._reader.attach()
-                self.root.after(0, lambda: self._lbl_samp.config(
-                    text="Conectado", fg=ACCENT))
+                self.root.after(0, self._set_connected)
                 break
             except Exception:
                 time.sleep(2.0)
@@ -195,52 +636,60 @@ class App:
         while True:
             try:
                 if not self._reader.is_attached():
-                    self.root.after(0, lambda: self._lbl_samp.config(
-                        text="Desconectado", fg="red"))
+                    self.root.after(0, self._set_disconnected)
                     break
-
                 for msg in self._reader.poll():
                     self._chat_queue.put(msg)
-
                 time.sleep(POLL_INTERVAL_MS / 1000)
-
             except Exception:
                 time.sleep(1.0)
 
-    # ── Drenagem da fila → UI ─────────────────────────────────────────────────
+    def _set_connected(self) -> None:
+        self._dot.config(fg=ACCENT)
+        self._lbl_status.config(text="Conectado", fg=ACCENT)
+
+    def _set_disconnected(self) -> None:
+        self._dot.config(fg="red")
+        self._lbl_status.config(text="Desconectado", fg="red")
+
+    def _clear_chat(self) -> None:
+        if self._overlay is not None:
+            self._overlay.clear_messages()
+
+    # ── Drenagem da fila → overlay ────────────────────────────────────────────
 
     def _drain_queue(self) -> None:
-        """Chamado pelo loop tkinter; move mensagens da fila para o log."""
+        active = [f for f in self._filters if f["var"].get()]
+        ignore_name = self._ignore_self["name"].lower() if self._ignore_self["var"].get() else ""
         while not self._chat_queue.empty():
             msg = self._chat_queue.get_nowait()
-            self._append_message(msg)
+            if active and not any(f["keyword"].lower() in msg.text.lower() for f in active):
+                continue
+            if ignore_name and msg.text.lower().startswith(ignore_name):
+                continue
+            if self._overlay:
+                self._overlay.add_message(msg.text)
         self.root.after(POLL_INTERVAL_MS, self._drain_queue)
 
-    def _append_message(self, msg: ChatMessage) -> None:
-        self._log.config(state="normal")
-        self._log.insert("end", f"{msg.text}\n", "info")
-        self._log.see("end")
-        self._log.config(state="disabled")
+    # ── Menu Chat ─────────────────────────────────────────────────────────────
 
-        # atualiza contador
-        cur = self._lbl_count.cget("text")
-        n = int(cur.split()[0]) + 1
-        self._lbl_count.config(text=f"{n} mensagens")
+    def _open_chat_menu(self) -> None:
+        if self._overlay is None:
+            return
+        ChatMenuDialog(master=self.root, overlay=self._overlay, hwnd=self._hwnd,
+                       ignore_self=self._ignore_self, on_filter_change=self._clear_chat)
 
-    # ── Utilitários ───────────────────────────────────────────────────────────
+    # ── Filtros ───────────────────────────────────────────────────────────────
 
-    def _clear_log(self) -> None:
-        self._log.config(state="normal")
-        self._log.delete("1.0", "end")
-        self._log.config(state="disabled")
-        self._lbl_count.config(text="0 mensagens")
+    def _open_filters_dialog(self) -> None:
+        FiltersDialog(master=self.root, filters=self._filters, overlay=self._overlay)
+
+    # ── Encerramento ──────────────────────────────────────────────────────────
 
     def _on_close(self) -> None:
         if self._overlay:
             self._overlay.stop()
         self.root.destroy()
-
-    # ── Inicialização ─────────────────────────────────────────────────────────
 
     def run(self) -> None:
         self.root.mainloop()
@@ -249,7 +698,7 @@ class App:
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def main() -> None:
-    app = App()
+    app = ControlPanel()
     app.run()
 
 

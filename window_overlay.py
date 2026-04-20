@@ -1,7 +1,6 @@
 import os
 import sys
 
-# venvs não herdam os caminhos do Tcl/Tk — aponta para a instalação base do Python
 def _fix_tcl_paths():
     base = getattr(sys, "base_prefix", sys.prefix)
     tcl = os.path.join(base, "tcl", "tcl8.6")
@@ -19,8 +18,6 @@ import win32process
 import win32api
 import win32con
 
-BORDER_COLOR = "#00FF00"
-BORDER_WIDTH = 3
 UPDATE_INTERVAL_MS = 100
 
 
@@ -79,8 +76,8 @@ class SelectorDialog:
         self._build_ui()
 
         if master is not None:
-            self.root.grab_set()          # bloqueia interação com a janela pai
-            master.wait_window(self.root) # aguarda fechar sem novo mainloop
+            self.root.grab_set()
+            master.wait_window(self.root)
         else:
             self.root.mainloop()
 
@@ -142,12 +139,25 @@ class SelectorDialog:
         self.root.destroy()
 
 
-class WindowOverlay:
-    """Overlay transparente que desenha um quadrado ao redor da janela alvo."""
+class ChatOverlay:
+    """Overlay transparente sobre o GTA que exibe o chat traduzido abaixo do chat SA-MP."""
+
+    MAX_MESSAGES = 9
+    # SA-MP chat nativo ocupa aprox. 50-72% da altura — começamos logo abaixo
+    CHAT_Y_RATIO = 0.73
+    CHAT_X_OFFSET = 8
+    LINE_HEIGHT = 19
+    FONT = ("Arial", 10, "bold")
+    TEXT_COLOR = "#FFFFFF"
+    # Sombra quase preta (não puro preto, pois preto = transparente com -transparentcolor)
+    SHADOW_COLOR = "#111111"
 
     def __init__(self, hwnd: int, master: tk.Misc | None = None):
         self._hwnd = hwnd
         self._running = True
+        self._messages: list[str] = []
+        self._pos_x: int | None = 48
+        self._pos_y: int | None = 330
 
         self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self._configure_window()
@@ -163,16 +173,61 @@ class WindowOverlay:
         self.root.geometry("1x1+0+0")
         self.root.configure(bg="black")
 
-    def _draw_border(self, x: int, y: int, w: int, h: int):
-        self.root.geometry(f"{w}x{h}+{x}+{y}")
-        self.canvas.config(width=w, height=h)
+    def add_message(self, text: str):
+        self._messages.append(text)
+        if len(self._messages) > self.MAX_MESSAGES:
+            self._messages.pop(0)
+
+    def clear_messages(self):
+        self._messages.clear()
+
+    def set_style(self, font_family: str, font_size: int, color: str) -> None:
+        self.FONT = (font_family, font_size, "bold")
+        self.TEXT_COLOR = color
+
+    def get_style(self) -> tuple[str, int, str]:
+        family = self.FONT[0]
+        size   = self.FONT[1]
+        return family, size, self.TEXT_COLOR
+
+    def get_max_messages(self) -> int:
+        return self.MAX_MESSAGES
+
+    def set_max_messages(self, n: int) -> None:
+        self.MAX_MESSAGES = max(1, n)
+        while len(self._messages) > self.MAX_MESSAGES:
+            self._messages.pop(0)
+
+    def get_position(self, window_h: int) -> tuple[int, int]:
+        x = self._pos_x if self._pos_x is not None else self.CHAT_X_OFFSET
+        y = self._pos_y if self._pos_y is not None else int(window_h * self.CHAT_Y_RATIO)
+        return x, y
+
+    def set_position(self, x: int, y: int) -> None:
+        self._pos_x = x
+        self._pos_y = y
+
+    def _redraw(self, w: int, h: int):
         self.canvas.delete("all")
-        half = BORDER_WIDTH // 2
-        self.canvas.create_rectangle(
-            half, half, w - half - 1, h - half - 1,
-            outline=BORDER_COLOR,
-            width=BORDER_WIDTH,
-        )
+        chat_x, chat_y = self.get_position(h)
+
+        for i, msg in enumerate(self._messages):
+            y = chat_y + i * self.LINE_HEIGHT
+            if y + self.LINE_HEIGHT > h:
+                break
+            # sombra para legibilidade
+            self.canvas.create_text(
+                chat_x + 1, y + 1,
+                text=msg, anchor="nw",
+                fill=self.SHADOW_COLOR,
+                font=self.FONT,
+            )
+            self.canvas.create_text(
+                chat_x, y,
+                text=msg, anchor="nw",
+                fill=self.TEXT_COLOR,
+                font=self.FONT,
+            )
 
     def _update(self):
         if not self._running:
@@ -185,15 +240,15 @@ class WindowOverlay:
 
         rect = get_window_rect(self._hwnd)
         if rect and rect[2] > 0 and rect[3] > 0:
-            self._draw_border(*rect)
+            x, y, w, h = rect
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+            self.canvas.config(width=w, height=h)
+            self._redraw(w, h)
             self.root.deiconify()
         else:
             self.root.withdraw()
 
         self.root.after(UPDATE_INTERVAL_MS, self._update)
-
-    def run(self):
-        self.root.mainloop()
 
     def stop(self):
         self._running = False
@@ -208,5 +263,5 @@ if __name__ == "__main__":
         print("Nenhuma janela selecionada. Encerrando.")
     else:
         print(f"Monitorando HWND={hwnd} — '{win32gui.GetWindowText(hwnd)}'")
-        overlay = WindowOverlay(hwnd)
-        overlay.run()
+        overlay = ChatOverlay(hwnd)
+        overlay.root.mainloop()
