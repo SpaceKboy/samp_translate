@@ -1,0 +1,14 @@
+# Ambiente virtual
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Variáveis de ambiente
+.env
+.env.*
+
+# Claude
+CLAUDE.md
