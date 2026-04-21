@@ -21,6 +21,29 @@ import win32con
 UPDATE_INTERVAL_MS = 100
 
 
+def _draw_rounded_rect(canvas, x1, y1, x2, y2, r, fill="#111111", outline="white", lw=1):
+    """Desenha retângulo com cantos arredondados no canvas."""
+    # preenchimento: dois retângulos + quatro arcos de canto
+    canvas.create_rectangle(x1+r, y1,   x2-r, y2,   fill=fill, outline="")
+    canvas.create_rectangle(x1,   y1+r, x2,   y2-r, fill=fill, outline="")
+    for ax, ay, start in [
+        (x1,     y1,     90), (x2-2*r, y1,     0),
+        (x1,     y2-2*r, 180),(x2-2*r, y2-2*r, 270),
+    ]:
+        canvas.create_arc(ax, ay, ax+2*r, ay+2*r, start=start, extent=90, fill=fill, outline="")
+    # contorno
+    canvas.create_line(x1+r, y1, x2-r, y1, fill=outline, width=lw)
+    canvas.create_line(x1+r, y2, x2-r, y2, fill=outline, width=lw)
+    canvas.create_line(x1, y1+r, x1, y2-r, fill=outline, width=lw)
+    canvas.create_line(x2, y1+r, x2, y2-r, fill=outline, width=lw)
+    for ax, ay, start in [
+        (x1,     y1,     90), (x2-2*r, y1,     0),
+        (x1,     y2-2*r, 180),(x2-2*r, y2-2*r, 270),
+    ]:
+        canvas.create_arc(ax, ay, ax+2*r, ay+2*r,
+                          start=start, extent=90, style="arc", outline=outline, width=lw)
+
+
 def list_visible_windows() -> list[tuple[int, str, str]]:
     """Retorna lista de (hwnd, titulo, nome_do_processo) de janelas visíveis."""
     windows = []
@@ -158,6 +181,8 @@ class ChatOverlay:
         self._messages: list[str] = []
         self._pos_x: int | None = 48
         self._pos_y: int | None = 330
+        self._input_pos_x: int | None = 48
+        self._input_pos_y: int | None = 267
 
         self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self._configure_window()
@@ -207,6 +232,16 @@ class ChatOverlay:
         self._pos_x = x
         self._pos_y = y
 
+    def get_input_position(self, window_h: int) -> tuple[int, int]:
+        if self._input_pos_x is not None and self._input_pos_y is not None:
+            return self._input_pos_x, self._input_pos_y
+        cx, cy = self.get_position(window_h)
+        return cx, cy + self.MAX_MESSAGES * self.LINE_HEIGHT + 6
+
+    def set_input_position(self, x: int, y: int) -> None:
+        self._input_pos_x = x
+        self._input_pos_y = y
+
     def _redraw(self, w: int, h: int):
         self.canvas.delete("all")
         chat_x, chat_y = self.get_position(h)
@@ -250,7 +285,195 @@ class ChatOverlay:
 
         self.root.after(UPDATE_INTERVAL_MS, self._update)
 
+    # Mapeamento shift+tecla para US QWERTY
+    _SHIFT_MAP = {
+        '1':'!','2':'@','3':'#','4':'$','5':'%','6':'^','7':'&','8':'*','9':'(','0':')',
+        '`':'~','-':'_','=':'+','[':'{',']':'}','\\':'|',';':':','\'':'"',',':'<','.':'>','/':'?',
+    }
+
+    # ── dimensões do input ────────────────────────────────────────────────────
+    _INPUT_W  = 340
+    _INPUT_H  = 28
+    _INPUT_R  = 14   # = H//2 → forma de pílula
+    _INPUT_PAD_LEFT  = 14   # margem esquerda interna
+    _INPUT_TEXT_X    = 22   # texto começa após o cursor
+
+    def _input_position(self) -> tuple[int, int]:
+        if self._input_pos_x is not None and self._input_pos_y is not None:
+            return self._input_pos_x, self._input_pos_y
+        x = self._pos_x if self._pos_x is not None else self.CHAT_X_OFFSET
+        y = (self._pos_y if self._pos_y is not None else 330) + self.MAX_MESSAGES * self.LINE_HEIGHT + 6
+        return x, y
+
+    def _make_input_canvas(self, x: int, y: int) -> tk.Canvas:
+        c = tk.Canvas(self.root, width=self._INPUT_W, height=self._INPUT_H,
+                      bg="black", highlightthickness=0, bd=0)
+        c.place(x=x, y=y)
+        return c
+
+    def _draw_input_canvas(self, text: str = "", cursor: bool = False) -> None:
+        c = self._input_frame
+        if c is None:
+            return
+        try:
+            if not c.winfo_exists():
+                return
+        except Exception:
+            return
+        W, H, R = self._INPUT_W, self._INPUT_H, self._INPUT_R
+        c.delete("all")
+        _draw_rounded_rect(c, 0, 0, W-1, H-1, R, fill="#111111", outline="white", lw=1)
+        if cursor:
+            px = self._INPUT_PAD_LEFT
+            c.create_line(px, 5, px, H-5, fill="white", width=2)
+        if text:
+            c.create_text(self._INPUT_TEXT_X, H//2, text=text,
+                          anchor="w", fill="white", font=("Arial", 10))
+
+    def _blink_input_cursor(self) -> None:
+        if getattr(self, "_input_frame", None) is None:
+            return
+        try:
+            if not self._input_frame.winfo_exists():
+                return
+        except Exception:
+            return
+        self._cursor_visible = not getattr(self, "_cursor_visible", True)
+        self._draw_input_canvas(
+            text=getattr(self, "_input_var", tk.StringVar()).get(),
+            cursor=self._cursor_visible,
+        )
+        self._cursor_job = self.root.after(530, self._blink_input_cursor)
+
+    def show_input_preview(self) -> None:
+        """Mostra o campo de texto visualmente (sem hook) para orientar o usuário."""
+        if getattr(self, "_input_frame", None) is not None:
+            try:
+                if self._input_frame.winfo_exists():
+                    return
+            except Exception:
+                pass
+        x, y = self._input_position()
+        self._input_frame = self._make_input_canvas(x, y)
+        self._input_kb_hook = None
+        self._draw_input_canvas(text="Chat de texto", cursor=False)
+
+    def move_input_preview(self, x: int, y: int) -> None:
+        """Reposiciona o preview do campo de texto em tempo real."""
+        if getattr(self, "_input_frame", None) is not None:
+            try:
+                if self._input_frame.winfo_exists():
+                    self._input_frame.place(x=x, y=y)
+            except Exception:
+                pass
+
+    def show_input(self, on_submit, on_cancel=None) -> None:
+        """Exibe caixinha de texto sobre o overlay sem roubar o foco do GTA."""
+        if getattr(self, "_input_frame", None) is not None:
+            try:
+                if self._input_frame.winfo_exists():
+                    return
+            except Exception:
+                pass
+
+        x, y = self._input_position()
+        self._input_frame = self._make_input_canvas(x, y)
+        self._input_var    = tk.StringVar()
+        self._cursor_visible = True
+        self._cursor_job     = None
+        self._draw_input_canvas(text="", cursor=True)
+        self._blink_input_cursor()
+
+        def _submit():
+            text = self._input_var.get().strip()
+            self._close_input()
+            if text and on_submit:
+                on_submit(text)
+
+        def _cancel():
+            self._close_input()
+            if on_cancel:
+                on_cancel()
+
+        self._start_input_hook(_submit, _cancel)
+
+    def _start_input_hook(self, on_submit, on_cancel) -> None:
+        """Hook global que captura todo o teclado enquanto o input está aberto."""
+        try:
+            import keyboard as kb
+
+            def _refresh(text):
+                self._draw_input_canvas(text=text, cursor=getattr(self, "_cursor_visible", True))
+
+            def _handler(event):
+                if event.event_type != kb.KEY_DOWN:
+                    return
+                name = event.name
+                if name == 'enter':
+                    self.root.after(0, on_submit)
+                elif name in ('escape', 'esc'):
+                    self.root.after(0, on_cancel)
+                elif name == 'backspace':
+                    def _back():
+                        t = self._input_var.get()[:-1]
+                        self._input_var.set(t)
+                        _refresh(t)
+                    self.root.after(0, _back)
+                else:
+                    char = self._resolve_char(name)
+                    if char is not None:
+                        def _append(c=char):
+                            t = self._input_var.get() + c
+                            self._input_var.set(t)
+                            _refresh(t)
+                        self.root.after(0, _append)
+
+            self._input_kb_hook = kb.hook(_handler, suppress=True)
+        except ImportError:
+            self._input_kb_hook = None
+
+    def _resolve_char(self, name: str) -> str | None:
+        """Converte nome de tecla em caractere, respeitando shift e caps lock."""
+        try:
+            import keyboard as kb
+            shift = kb.is_pressed('shift')
+            caps  = kb.is_pressed('caps lock')
+        except Exception:
+            shift = caps = False
+
+        if len(name) == 1:
+            if name.isalpha():
+                return name.upper() if (shift ^ caps) else name
+            if shift and name in self._SHIFT_MAP:
+                return self._SHIFT_MAP[name]
+            return name
+        if name == 'space':
+            return ' '
+        return None
+
+    def _close_input(self) -> None:
+        if getattr(self, "_cursor_job", None) is not None:
+            try:
+                self.root.after_cancel(self._cursor_job)
+            except Exception:
+                pass
+            self._cursor_job = None
+        if getattr(self, "_input_kb_hook", None) is not None:
+            try:
+                import keyboard as kb
+                kb.unhook(self._input_kb_hook)
+            except Exception:
+                pass
+            self._input_kb_hook = None
+        if getattr(self, "_input_frame", None) is not None:
+            try:
+                self._input_frame.destroy()
+            except Exception:
+                pass
+            self._input_frame = None
+
     def stop(self):
+        self._close_input()
         self._running = False
         self.root.destroy()
 
