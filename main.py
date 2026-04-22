@@ -45,10 +45,61 @@ FONT_UI  = ("Segoe UI", 9)
 
 POLL_INTERVAL_MS = 200
 
-LANGUAGES: dict[str, str] = {
-    "Português": "pt",
-    "Espanhol":  "es",
+ALL_LANGUAGES: dict[str, str] = {
+    "Afrikaans":           "af",
+    "Albanês":             "sq",
+    "Alemão":              "de",
+    "Árabe":               "ar",
+    "Azerbaijano":         "az",
+    "Bengali":             "bn",
+    "Bósnio":              "bs",
+    "Búlgaro":             "bg",
+    "Catalão":             "ca",
+    "Checo":               "cs",
+    "Chinês Simplificado": "zh",
+    "Chinês Tradicional":  "zt",
+    "Croata":              "hr",
+    "Dinamarquês":         "da",
+    "Eslovaco":            "sk",
+    "Esloveno":            "sl",
+    "Espanhol":            "es",
+    "Esperanto":           "eo",
+    "Estônio":             "et",
+    "Finlandês":           "fi",
+    "Francês":             "fr",
+    "Galego":              "gl",
+    "Grego":               "el",
+    "Hebraico":            "he",
+    "Hindi":               "hi",
+    "Holandês":            "nl",
+    "Húngaro":             "hu",
+    "Indonésio":           "id",
+    "Inglês":              "en",
+    "Irlandês":            "ga",
+    "Italiano":            "it",
+    "Japonês":             "ja",
+    "Coreano":             "ko",
+    "Letão":               "lv",
+    "Lituano":             "lt",
+    "Macedônio":           "mk",
+    "Malaio":              "ms",
+    "Norueguês":           "nb",
+    "Persa":               "fa",
+    "Polonês":             "pl",
+    "Português":           "pt",
+    "Romeno":              "ro",
+    "Russo":               "ru",
+    "Sérvio":              "sr",
+    "Sueco":               "sv",
+    "Tagalo":              "tl",
+    "Tailandês":           "th",
+    "Turco":               "tr",
+    "Ucraniano":           "uk",
+    "Urdu":                "ur",
+    "Vietnamita":          "vi",
 }
+CODE_TO_LANG: dict[str, str] = {v: k for k, v in ALL_LANGUAGES.items()}
+LANG_PLACEHOLDER = "─ Selecionar ─"
 
 
 # ── Diálogo de posição do chat ───────────────────────────────────────────────
@@ -263,14 +314,18 @@ class ChatStyleDialog:
         # cor
         row_color = tk.Frame(self.root, bg=BG, **pad)
         row_color.pack(fill="x")
-        tk.Label(row_color, text="Cor (hex):", bg=BG, fg=FG, font=FONT_UI, width=8, anchor="w").pack(side="left")
-        color_entry = tk.Entry(row_color, textvariable=self._color_var, width=10,
-                               bg=BG_PANEL, fg=FG, relief="flat", insertbackground=FG)
-        color_entry.pack(side="left")
-        self._color_preview = tk.Label(row_color, text="  ██  ", bg=BG, fg=self._color_var.get(),
-                                       font=("Segoe UI", 11))
-        self._color_preview.pack(side="left", padx=(8, 0))
-        self._color_var.trace_add("write", self._update_preview)
+        tk.Label(row_color, text="Cor:", bg=BG, fg=FG, font=FONT_UI, width=8, anchor="w").pack(side="left")
+        self._color_swatch = tk.Label(
+            row_color, text="  ██  ", bg=BG, fg=self._color_var.get(),
+            font=("Segoe UI", 11), cursor="hand2",
+        )
+        self._color_swatch.pack(side="left")
+        tk.Button(
+            row_color, text="Escolher",
+            command=self._pick_color,
+            bg=BG_PANEL, fg=FG, relief="flat", padx=8, pady=2,
+            activebackground=ACCENT, activeforeground="#000", cursor="hand2",
+        ).pack(side="left", padx=(6, 0))
 
         # botões
         btn_row = tk.Frame(self.root, bg=BG, padx=14, pady=8)
@@ -284,20 +339,15 @@ class ChatStyleDialog:
             bg=BG_PANEL, fg=FG, relief="flat", padx=12, pady=4, cursor="hand2",
         ).pack(side="left")
 
-    def _update_preview(self, *_) -> None:
-        try:
-            color = self._color_var.get()
-            self._color_preview.config(fg=color)
-        except Exception:
-            pass
+    def _pick_color(self) -> None:
+        from tkinter import colorchooser
+        result = colorchooser.askcolor(color=self._color_var.get(), title="Cor do chat", parent=self.root)
+        if result and result[1]:
+            self._color_var.set(result[1])
+            self._color_swatch.config(fg=result[1])
 
     def _apply(self) -> None:
-        try:
-            color = self._color_var.get()
-            self.root.winfo_rgb(color)  # valida a cor antes de aplicar
-        except Exception:
-            return
-        self._overlay.set_style(self._font_var.get(), self._size_var.get(), color)
+        self._overlay.set_style(self._font_var.get(), self._size_var.get(), self._color_var.get())
         self._overlay.set_max_messages(self._lines_var.get())
 
 
@@ -346,6 +396,27 @@ class AddFilterDialog:
         tk.Entry(row_kw, textvariable=self._kw_var, width=22,
                  bg=BG_PANEL, fg=FG, relief="flat", insertbackground=FG).pack(side="left")
 
+        # Seletor de cor — apenas para WhiteList
+        self._font_color: str = ""
+        if self._filter_type == "whitelist":
+            row_color = tk.Frame(self.root, bg=BG, **pad)
+            row_color.pack(fill="x")
+            tk.Label(row_color, text="Cor da fonte:", bg=BG, fg=FG,
+                     font=FONT_UI, width=12, anchor="w").pack(side="left")
+            self._color_swatch = tk.Label(
+                row_color, text="  ██  ", bg=BG, fg="#FFFFFF",
+                font=("Segoe UI", 11), cursor="hand2",
+            )
+            self._color_swatch.pack(side="left")
+            tk.Button(
+                row_color, text="Escolher",
+                command=self._pick_color,
+                bg=BG_PANEL, fg=FG, relief="flat", padx=8, pady=2,
+                activebackground=ACCENT, activeforeground="#000", cursor="hand2",
+            ).pack(side="left", padx=(6, 0))
+            tk.Label(row_color, text="(padrão se vazio)", bg=BG, fg=FG_DIM,
+                     font=("Segoe UI", 8)).pack(side="left", padx=(8, 0))
+
         btn_row = tk.Frame(self.root, bg=BG, padx=14, pady=8)
         btn_row.pack(fill="x")
         tk.Button(btn_row, text="Adicionar", command=self._confirm,
@@ -353,11 +424,19 @@ class AddFilterDialog:
         tk.Button(btn_row, text="Cancelar", command=self.root.destroy,
                   bg=BG_PANEL, fg=FG, relief="flat", padx=12, pady=4, cursor="hand2").pack(side="left")
 
+    def _pick_color(self) -> None:
+        from tkinter import colorchooser
+        initial = self._font_color if self._font_color else "#FFFFFF"
+        result = colorchooser.askcolor(color=initial, title="Cor da fonte", parent=self.root)
+        if result and result[1]:
+            self._font_color = result[1]
+            self._color_swatch.config(fg=result[1])
+
     def _confirm(self) -> None:
         name = self._name_var.get().strip()
         keyword = self._kw_var.get().strip()
         if name and keyword:
-            self._on_confirm(name, keyword, self._filter_type)
+            self._on_confirm(name, keyword, self._filter_type, self._font_color)
             self.root.destroy()
 
 
@@ -498,6 +577,16 @@ class FiltersDialog:
                 font=FONT_UI, cursor="hand2",
             ).pack(side="left")
 
+            # Swatch de cor editável (só para whitelist)
+            if ftype == "whitelist":
+                swatch_color = f.get("color") or "#FFFFFF"
+                swatch = tk.Label(
+                    row, text="■", bg=BG_PANEL, fg=swatch_color,
+                    font=("Segoe UI", 14), cursor="hand2",
+                )
+                swatch.pack(side="right", padx=(4, 0))
+                swatch.bind("<Button-1>", lambda e, fil=f, sw=swatch: self._change_filter_color(fil, sw))
+
             tk.Label(
                 row, text=f'"{f["keyword"]}"',
                 bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 8),
@@ -510,16 +599,25 @@ class FiltersDialog:
     def _open_add_filter(self, filter_type: str) -> None:
         AddFilterDialog(master=self.root, filter_type=filter_type, on_confirm=self._add_filter)
 
-    def _add_filter(self, name: str, keyword: str, filter_type: str) -> None:
+    def _add_filter(self, name: str, keyword: str, filter_type: str, color: str = "") -> None:
         self._filters.append({
             "name":    name,
             "keyword": keyword,
             "type":    filter_type,
+            "color":   color,
             "var":     tk.BooleanVar(value=False),
         })
         self._render_filters()
         if self._overlay:
             self._overlay.clear_messages()
+
+    def _change_filter_color(self, f: dict, swatch: tk.Label) -> None:
+        from tkinter import colorchooser
+        initial = f.get("color") or "#FFFFFF"
+        result = colorchooser.askcolor(color=initial, title="Cor da fonte", parent=self.root)
+        if result and result[1]:
+            f["color"] = result[1]
+            swatch.config(fg=result[1])
 
 
 # ── Diálogo de nome do jogador ────────────────────────────────────────────────
@@ -626,10 +724,11 @@ class TranslationDialog:
     """Janela de configuração da tradução do chat."""
 
     def __init__(self, master: tk.Misc, translation: dict,
-                 check_fn, download_fn):
-        self._translation = translation
-        self._check_fn    = check_fn
-        self._download_fn = download_fn
+                 check_fn, download_fn, get_installed_fn):
+        self._translation      = translation
+        self._check_fn         = check_fn
+        self._download_fn      = download_fn
+        self._get_installed_fn = get_installed_fn
 
         self.root = tk.Toplevel(master)
         self.root.title("Tradução")
@@ -645,15 +744,12 @@ class TranslationDialog:
         tk.Label(self.root, text="Tradução", bg=BG, fg=ACCENT,
                  font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
 
-        langs = list(LANGUAGES.keys())
-
         # ── Chat Servidor ──
         self._build_section(
             title="Chat Servidor",
             enabled_var=self._translation["enabled"],
             source_var=self._translation["source"],
             target_var=self._translation["target"],
-            langs=langs,
             on_change=self._refresh_status,
         )
 
@@ -663,7 +759,6 @@ class TranslationDialog:
             enabled_var=self._translation["user_enabled"],
             source_var=self._translation["user_source"],
             target_var=self._translation["user_target"],
-            langs=langs,
             on_change=self._refresh_user_status,
         )
 
@@ -675,6 +770,14 @@ class TranslationDialog:
                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
         tk.Frame(pkg_frame, bg="#2a2a4a", height=1).pack(fill="x", pady=(4, 8))
 
+        # Dropdown de pacotes instalados
+        self._installed_pkg_frame = tk.Frame(pkg_frame, bg=BG_PANEL)
+        self._installed_pkg_frame.pack(fill="x", pady=(0, 8))
+        self._refresh_installed_dropdown()
+
+        tk.Frame(pkg_frame, bg="#2a2a4a", height=1).pack(fill="x", pady=(0, 8))
+
+        # Baixar — Chat Servidor
         tk.Label(pkg_frame, text="Chat Servidor:", bg=BG_PANEL, fg=FG_DIM,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w")
         self._lbl_pkg_status = tk.Label(pkg_frame, text="Verificando…",
@@ -688,6 +791,7 @@ class TranslationDialog:
         )
         self._btn_download.pack(anchor="w", pady=(4, 10))
 
+        # Baixar — Chat Usuário
         tk.Label(pkg_frame, text="Chat Usuário:", bg=BG_PANEL, fg=FG_DIM,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w")
         self._lbl_user_pkg_status = tk.Label(pkg_frame, text="Verificando…",
@@ -705,8 +809,63 @@ class TranslationDialog:
                   bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4,
                   cursor="hand2").pack(pady=(6, 10))
 
+    def _refresh_installed_dropdown(self) -> None:
+        """Reconstrói o dropdown que lista os pacotes já instalados."""
+        for w in self._installed_pkg_frame.winfo_children():
+            w.destroy()
+
+        tk.Label(
+            self._installed_pkg_frame,
+            text="Pacotes instalados:", bg=BG_PANEL, fg=FG_DIM,
+            font=("Segoe UI", 8, "bold"),
+        ).pack(anchor="w")
+
+        pairs = self._get_installed_fn()
+        if not pairs:
+            tk.Label(
+                self._installed_pkg_frame,
+                text="Nenhum pacote instalado",
+                bg=BG_PANEL, fg=FG_DIM, font=FONT_UI,
+            ).pack(anchor="w", pady=(2, 0))
+            return
+
+        pair_names = [
+            f"{CODE_TO_LANG.get(src, src)} → {CODE_TO_LANG.get(tgt, tgt)}"
+            for src, tgt in pairs
+        ]
+        self._installed_pkg_var = tk.StringVar(value=pair_names[0])
+        om = tk.OptionMenu(self._installed_pkg_frame, self._installed_pkg_var, *pair_names)
+        om.config(bg=BG, fg=ACCENT, relief="flat", activebackground=ACCENT,
+                  activeforeground="#000", highlightthickness=0, width=26)
+        om["menu"].config(bg=BG, fg=ACCENT)
+        om.pack(anchor="w", pady=(2, 0))
+
+    def _make_lang_dropdown(self, parent, var, on_change) -> tk.OptionMenu:
+        """Cria OptionMenu com idiomas instalados em verde e no topo."""
+        installed_pairs = self._get_installed_fn()
+        installed_codes: set[str] = set()
+        for src, tgt in installed_pairs:
+            installed_codes.add(src)
+            installed_codes.add(tgt)
+
+        installed_names = sorted(n for n, c in ALL_LANGUAGES.items() if c in installed_codes)
+        other_names     = sorted(n for n, c in ALL_LANGUAGES.items() if c not in installed_codes)
+        all_options     = [LANG_PLACEHOLDER] + installed_names + other_names
+
+        om = tk.OptionMenu(parent, var, *all_options, command=lambda _: on_change())
+        om.config(bg=BG, fg=FG, relief="flat", activebackground=ACCENT,
+                  activeforeground="#000", highlightthickness=0, width=16)
+        menu = om["menu"]
+        menu.config(bg=BG, fg=FG)
+
+        # Colorir idiomas com pacote instalado de verde
+        for i, name in enumerate(installed_names):
+            menu.entryconfig(i + 1, foreground="#00FF00")  # +1 pula o placeholder
+
+        return om
+
     def _build_section(self, title: str, enabled_var, source_var, target_var,
-                       langs: list, on_change) -> None:
+                       on_change) -> None:
         section = tk.Frame(self.root, bg=BG_PANEL, padx=12, pady=10)
         section.pack(fill="x", padx=14, pady=(0, 8))
 
@@ -728,34 +887,29 @@ class TranslationDialog:
         row_in.pack(fill="x", pady=(0, 6))
         tk.Label(row_in, text="Entrada:", bg=BG_PANEL, fg=FG_DIM,
                  font=FONT_UI, width=8, anchor="w").pack(side="left")
-        om_in = tk.OptionMenu(row_in, source_var, *langs, command=lambda _: on_change())
-        om_in.config(bg=BG, fg=FG, relief="flat", activebackground=ACCENT,
-                     activeforeground="#000", highlightthickness=0, width=12)
-        om_in["menu"].config(bg=BG, fg=FG)
-        om_in.pack(side="left")
+        self._make_lang_dropdown(row_in, source_var, on_change).pack(side="left")
 
         row_out = tk.Frame(section, bg=BG_PANEL)
         row_out.pack(fill="x")
         tk.Label(row_out, text="Saída:", bg=BG_PANEL, fg=FG_DIM,
                  font=FONT_UI, width=8, anchor="w").pack(side="left")
-        om_out = tk.OptionMenu(row_out, target_var, *langs, command=lambda _: on_change())
-        om_out.config(bg=BG, fg=FG, relief="flat", activebackground=ACCENT,
-                      activeforeground="#000", highlightthickness=0, width=12)
-        om_out["menu"].config(bg=BG, fg=FG)
-        om_out.pack(side="left")
+        self._make_lang_dropdown(row_out, target_var, on_change).pack(side="left")
 
-    def _current_codes(self) -> tuple[str, str]:
-        return (LANGUAGES.get(self._translation["source"].get(), "es"),
-                LANGUAGES.get(self._translation["target"].get(), "pt"))
+    def _current_codes(self) -> tuple[str | None, str | None]:
+        return (ALL_LANGUAGES.get(self._translation["source"].get()),
+                ALL_LANGUAGES.get(self._translation["target"].get()))
 
-    def _current_user_codes(self) -> tuple[str, str]:
-        return (LANGUAGES.get(self._translation["user_source"].get(), "pt"),
-                LANGUAGES.get(self._translation["user_target"].get(), "es"))
+    def _current_user_codes(self) -> tuple[str | None, str | None]:
+        return (ALL_LANGUAGES.get(self._translation["user_source"].get()),
+                ALL_LANGUAGES.get(self._translation["user_target"].get()))
 
     def _refresh_status(self) -> None:
         src, tgt = self._current_codes()
-        installed = self._check_fn(src, tgt)
-        if installed:
+        if not src or not tgt:
+            self._lbl_pkg_status.config(text="Selecione os idiomas acima", fg=FG_DIM)
+            self._btn_download.config(state="disabled", fg=FG_DIM)
+            return
+        if self._check_fn(src, tgt):
             self._lbl_pkg_status.config(text="✓ Instalados — tradução offline pronta", fg=ACCENT)
             self._btn_download.config(state="disabled", fg=FG_DIM)
         else:
@@ -764,8 +918,11 @@ class TranslationDialog:
 
     def _refresh_user_status(self) -> None:
         src, tgt = self._current_user_codes()
-        installed = self._check_fn(src, tgt)
-        if installed:
+        if not src or not tgt:
+            self._lbl_user_pkg_status.config(text="Selecione os idiomas acima", fg=FG_DIM)
+            self._btn_user_download.config(state="disabled", fg=FG_DIM)
+            return
+        if self._check_fn(src, tgt):
             self._lbl_user_pkg_status.config(text="✓ Instalados — tradução offline pronta", fg=ACCENT)
             self._btn_user_download.config(state="disabled", fg=FG_DIM)
         else:
@@ -774,6 +931,8 @@ class TranslationDialog:
 
     def _download_packages(self) -> None:
         src, tgt = self._current_codes()
+        if not src or not tgt:
+            return
         self._btn_download.config(state="disabled", text="Baixando…", fg=FG_DIM)
         self._lbl_pkg_status.config(text="Baixando pacotes (necessário internet)…", fg=FG_DIM)
 
@@ -781,6 +940,7 @@ class TranslationDialog:
             if ok:
                 self._lbl_pkg_status.config(text="✓ Instalado com sucesso!", fg=ACCENT)
                 self._btn_download.config(text="Baixar pacotes", state="disabled", fg=FG_DIM)
+                self._refresh_installed_dropdown()
             else:
                 self._lbl_pkg_status.config(text="✗ Falha no download.", fg="#ff6666")
                 self._btn_download.config(text="Baixar pacotes", state="normal", fg=ACCENT)
@@ -789,6 +949,8 @@ class TranslationDialog:
 
     def _download_user_packages(self) -> None:
         src, tgt = self._current_user_codes()
+        if not src or not tgt:
+            return
         self._btn_user_download.config(state="disabled", text="Baixando…", fg=FG_DIM)
         self._lbl_user_pkg_status.config(text="Baixando pacotes (necessário internet)…", fg=FG_DIM)
 
@@ -796,11 +958,144 @@ class TranslationDialog:
             if ok:
                 self._lbl_user_pkg_status.config(text="✓ Instalado com sucesso!", fg=ACCENT)
                 self._btn_user_download.config(text="Baixar pacotes", state="disabled", fg=FG_DIM)
+                self._refresh_installed_dropdown()
             else:
                 self._lbl_user_pkg_status.config(text="✗ Falha no download.", fg="#ff6666")
                 self._btn_user_download.config(text="Baixar pacotes", state="normal", fg=ACCENT)
 
         self._download_fn(src, tgt, on_done)
+
+
+# ── Diálogo de atalhos ───────────────────────────────────────────────────────
+
+class ShortcutsDialog:
+    """Janela para configurar as teclas de atalho do SAMP Translate."""
+
+    _IGNORE_KEYS = frozenset({
+        "shift", "left shift", "right shift",
+        "ctrl",  "left ctrl",  "right ctrl",
+        "alt",   "left alt",   "right alt",
+        "caps lock", "tab", "win", "left win", "right win",
+        "unknown",
+    })
+
+    def __init__(self, master: tk.Misc, shortcuts: dict, on_change):
+        self._shortcuts  = shortcuts   # {"chat_key": "y", ...}
+        self._on_change  = on_change
+        self._listening  = False
+        self._hook       = None
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Atalhos")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self._build_ui()
+        self.root.grab_set()
+
+    def _build_ui(self) -> None:
+        tk.Label(self.root, text="Atalhos", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
+
+        tk.Label(
+            self.root,
+            text="Clique em 'Alterar' e pressione a nova tecla desejada.",
+            bg=BG, fg=FG_DIM, font=("Segoe UI", 8), padx=14,
+        ).pack(anchor="w")
+
+        section = tk.Frame(self.root, bg=BG_PANEL, padx=12, pady=10)
+        section.pack(fill="x", padx=14, pady=(8, 8))
+
+        tk.Label(section, text="Chat de texto", bg=BG_PANEL, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Label(
+            section,
+            text="Abre o campo de envio de mensagem enquanto o GTA está em foco.",
+            bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(2, 6))
+        tk.Frame(section, bg="#2a2a4a", height=1).pack(fill="x", pady=(0, 8))
+
+        row = tk.Frame(section, bg=BG_PANEL)
+        row.pack(fill="x")
+
+        tk.Label(row, text="Tecla:", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_UI, width=8, anchor="w").pack(side="left")
+
+        self._key_label = tk.Label(
+            row, text=self._shortcuts["chat_key"].upper(),
+            bg=BG, fg=ACCENT, font=("Consolas", 12, "bold"),
+            width=6, relief="flat", padx=6, pady=3,
+        )
+        self._key_label.pack(side="left", padx=(0, 10))
+
+        self._btn_change = tk.Button(
+            row, text="Alterar",
+            command=self._start_listening,
+            bg=BG_PANEL, fg=FG, relief="flat", padx=10, pady=4,
+            activebackground=ACCENT, activeforeground="#000", cursor="hand2",
+        )
+        self._btn_change.pack(side="left")
+
+        tk.Button(
+            self.root, text="Fechar", command=self._on_close,
+            bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2",
+        ).pack(pady=(4, 10))
+
+    def _start_listening(self) -> None:
+        if self._listening:
+            return
+        self._listening = True
+        self._key_label.config(text="...", fg=FG_DIM)
+        self._btn_change.config(text="Cancelar", fg="#ff6666",
+                                activebackground="#ff6666",
+                                command=self._cancel_listening)
+        try:
+            import keyboard as kb
+
+            def _handler(event):
+                if event.event_type != kb.KEY_DOWN:
+                    return
+                name = event.name.lower()
+                if name in self._IGNORE_KEYS:
+                    return
+                self.root.after(0, lambda n=name: self._apply_key(n))
+
+            self._hook = kb.hook(_handler, suppress=False)
+        except ImportError:
+            self._cancel_listening()
+
+    def _apply_key(self, name: str) -> None:
+        self._stop_hook()
+        self._listening = False
+        self._shortcuts["chat_key"] = name
+        self._key_label.config(text=name.upper(), fg=ACCENT)
+        self._btn_change.config(text="Alterar", fg=FG,
+                                activebackground=ACCENT,
+                                command=self._start_listening)
+        self._on_change()
+
+    def _cancel_listening(self) -> None:
+        self._stop_hook()
+        self._listening = False
+        self._key_label.config(text=self._shortcuts["chat_key"].upper(), fg=ACCENT)
+        self._btn_change.config(text="Alterar", fg=FG,
+                                activebackground=ACCENT,
+                                command=self._start_listening)
+
+    def _stop_hook(self) -> None:
+        if self._hook is not None:
+            try:
+                import keyboard as kb
+                kb.unhook(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+
+    def _on_close(self) -> None:
+        self._stop_hook()
+        self.root.destroy()
 
 
 # ── Painel de controle (menu externo) ────────────────────────────────────────
@@ -827,16 +1122,17 @@ class ControlPanel:
         self._ignore_self: dict = {"var": tk.BooleanVar(value=False), "name": ""}
         self._translation: dict = {
             "enabled":      tk.BooleanVar(value=False),
-            "source":       tk.StringVar(value="Espanhol"),
-            "target":       tk.StringVar(value="Português"),
+            "source":       tk.StringVar(value=LANG_PLACEHOLDER),
+            "target":       tk.StringVar(value=LANG_PLACEHOLDER),
             "user_enabled": tk.BooleanVar(value=False),
-            "user_source":  tk.StringVar(value="Português"),
-            "user_target":  tk.StringVar(value="Espanhol"),
+            "user_source":  tk.StringVar(value=LANG_PLACEHOLDER),
+            "user_target":  tk.StringVar(value=LANG_PLACEHOLDER),
         }
         self._argos_cache: dict = {}  # (src_code, tgt_code) → translator object
         self._translation["enabled"].trace_add("write", self._on_translation_toggle)
         self._translation["user_enabled"].trace_add("write", self._on_translation_toggle)
         self._kb_hook = None
+        self._shortcuts: dict = {"chat_key": "y"}
 
         self._build_ui()
 
@@ -909,6 +1205,14 @@ class ControlPanel:
         ).pack(fill="x", pady=(4, 0))
 
         tk.Button(
+            btn_frame, text="Atalhos",
+            command=self._open_shortcuts_dialog,
+            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
+            activebackground=ACCENT, activeforeground="#000",
+            cursor="hand2",
+        ).pack(fill="x", pady=(4, 0))
+
+        tk.Button(
             btn_frame, text="Limpar chat",
             command=self._clear_chat,
             bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
@@ -937,7 +1241,7 @@ class ControlPanel:
         if self._overlay is not None:
             self._overlay.stop()
         self._overlay = ChatOverlay(hwnd, master=self.root)
-        self._setup_y_hook()
+        self._setup_chat_hook()
 
     # ── Leitor de chat (thread) ───────────────────────────────────────────────
 
@@ -987,9 +1291,9 @@ class ControlPanel:
     def _try_translate(self, msg):
         if not self._translation["enabled"].get():
             return msg
-        src = LANGUAGES.get(self._translation["source"].get(), "es")
-        tgt = LANGUAGES.get(self._translation["target"].get(), "pt")
-        if src == tgt:
+        src = ALL_LANGUAGES.get(self._translation["source"].get())
+        tgt = ALL_LANGUAGES.get(self._translation["target"].get())
+        if not src or not tgt or src == tgt:
             return msg
         translator = self._argos_cache.get((src, tgt))
         if not translator:
@@ -1028,13 +1332,15 @@ class ControlPanel:
                     self._raw_queue.get_nowait()
                 except queue.Empty:
                     break
-            src = LANGUAGES.get(self._translation["source"].get(), "es")
-            tgt = LANGUAGES.get(self._translation["target"].get(), "pt")
-            self._prewarm_translator(src, tgt)
+            src = ALL_LANGUAGES.get(self._translation["source"].get())
+            tgt = ALL_LANGUAGES.get(self._translation["target"].get())
+            if src and tgt:
+                self._prewarm_translator(src, tgt)
         if self._translation["user_enabled"].get():
-            u_src = LANGUAGES.get(self._translation["user_source"].get(), "pt")
-            u_tgt = LANGUAGES.get(self._translation["user_target"].get(), "es")
-            self._prewarm_translator(u_src, u_tgt)
+            u_src = ALL_LANGUAGES.get(self._translation["user_source"].get())
+            u_tgt = ALL_LANGUAGES.get(self._translation["user_target"].get())
+            if u_src and u_tgt:
+                self._prewarm_translator(u_src, u_tgt)
 
     def _check_argos_installed(self, src: str, tgt: str) -> bool:
         try:
@@ -1067,12 +1373,25 @@ class ControlPanel:
                 self.root.after(0, lambda: on_done(False))
         threading.Thread(target=_worker, daemon=True, name="argos-download").start()
 
+    def _get_installed_pairs(self) -> list[tuple[str, str]]:
+        """Retorna lista de (src_code, tgt_code) dos pacotes argostranslate instalados."""
+        try:
+            import argostranslate.translate as at
+            pairs = []
+            for lang in at.get_installed_languages():
+                for t in lang.translations_from:
+                    pairs.append((lang.code, t.to_lang.code))
+            return pairs
+        except Exception:
+            return []
+
     def _open_translation_dialog(self) -> None:
         TranslationDialog(
             master=self.root,
             translation=self._translation,
             check_fn=self._check_argos_installed,
             download_fn=self._download_argos_packages,
+            get_installed_fn=self._get_installed_pairs,
         )
 
     def _set_connected(self) -> None:
@@ -1096,16 +1415,20 @@ class ControlPanel:
         while not self._display_queue.empty():
             original, translated = self._display_queue.get_nowait()
             text_low = original.text.lower()
-            # WhiteList: se há algum ativo, mensagem precisa conter pelo menos uma palavra-chave
-            if whitelist and not any(f["keyword"].lower() in text_low for f in whitelist):
-                continue
+            # WhiteList: encontra o primeiro filtro que faz match (captura a cor)
+            matched_color: str | None = None
+            if whitelist:
+                matched = next((f for f in whitelist if f["keyword"].lower() in text_low), None)
+                if matched is None:
+                    continue
+                matched_color = matched.get("color") or None
             # BlackList: descarta mensagem se contiver qualquer palavra-chave ativa
             if any(f["keyword"].lower() in text_low for f in blacklist):
                 continue
             if ignore_name and text_low.startswith(ignore_name):
                 continue
             if self._overlay:
-                self._overlay.add_message(translated.text)
+                self._overlay.add_message(translated.text, color=matched_color)
         self.root.after(POLL_INTERVAL_MS, self._drain_queue)
 
     # ── Menu Chat ─────────────────────────────────────────────────────────────
@@ -1121,10 +1444,20 @@ class ControlPanel:
         FiltersDialog(master=self.root, filters=self._filters, overlay=self._overlay,
                       ignore_self=self._ignore_self, on_filter_change=self._clear_chat)
 
-    # ── Envio de mensagem (tecla Y) ───────────────────────────────────────────
+    # ── Atalhos ───────────────────────────────────────────────────────────────
 
-    def _setup_y_hook(self) -> None:
-        """Hook global: intercepta Y quando GTA está em foco."""
+    def _open_shortcuts_dialog(self) -> None:
+        ShortcutsDialog(master=self.root, shortcuts=self._shortcuts,
+                        on_change=self._on_shortcut_change)
+
+    def _on_shortcut_change(self) -> None:
+        if self._hwnd:
+            self._setup_chat_hook()
+
+    # ── Envio de mensagem (tecla configurável) ───────────────────────────────
+
+    def _setup_chat_hook(self) -> None:
+        """Hook global: intercepta a tecla de chat quando GTA está em foco."""
         try:
             import keyboard
 
@@ -1134,6 +1467,8 @@ class ControlPanel:
                 except Exception:
                     pass
 
+            key = self._shortcuts["chat_key"]
+
             def _handler(event):
                 try:
                     if win32gui.GetForegroundWindow() == self._hwnd:
@@ -1141,8 +1476,7 @@ class ControlPanel:
                 except Exception:
                     pass
 
-            # on_press_key('y') suprime APENAS o Y — não bloqueia todas as teclas do jogo
-            self._kb_hook = keyboard.on_press_key('y', _handler, suppress=True)
+            self._kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
         except ImportError:
             pass
 
@@ -1156,9 +1490,9 @@ class ControlPanel:
         def _worker():
             result = text
             if self._translation["user_enabled"].get():
-                src = LANGUAGES.get(self._translation["user_source"].get(), "pt")
-                tgt = LANGUAGES.get(self._translation["user_target"].get(), "es")
-                if src != tgt:
+                src = ALL_LANGUAGES.get(self._translation["user_source"].get())
+                tgt = ALL_LANGUAGES.get(self._translation["user_target"].get())
+                if src and tgt and src != tgt:
                     translator = self._argos_cache.get((src, tgt))
                     if translator:
                         try:

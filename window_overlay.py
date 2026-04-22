@@ -198,12 +198,12 @@ class ChatOverlay:
         self.root.geometry("1x1+0+0")
         self.root.configure(bg="black")
 
-    def add_message(self, text: str):
-        self._messages.append(text)
+    def add_message(self, text: str, color: str | None = None) -> None:
+        self._messages.append((text, color))
         if len(self._messages) > self.MAX_MESSAGES:
             self._messages.pop(0)
 
-    def clear_messages(self):
+    def clear_messages(self) -> None:
         self._messages.clear()
 
     def set_style(self, font_family: str, font_size: int, color: str) -> None:
@@ -246,11 +246,11 @@ class ChatOverlay:
         self.canvas.delete("all")
         chat_x, chat_y = self.get_position(h)
 
-        for i, msg in enumerate(self._messages):
+        for i, (msg, msg_color) in enumerate(self._messages):
             y = chat_y + i * self.LINE_HEIGHT
             if y + self.LINE_HEIGHT > h:
                 break
-            # sombra para legibilidade
+            text_color = msg_color if msg_color else self.TEXT_COLOR
             self.canvas.create_text(
                 chat_x + 1, y + 1,
                 text=msg, anchor="nw",
@@ -260,7 +260,7 @@ class ChatOverlay:
             self.canvas.create_text(
                 chat_x, y,
                 text=msg, anchor="nw",
-                fill=self.TEXT_COLOR,
+                fill=text_color,
                 font=self.FONT,
             )
 
