@@ -303,14 +303,20 @@ class ChatStyleDialog:
 
 # ── Diálogo de filtros ────────────────────────────────────────────────────────
 
-class AddFilterDialog:
-    """Janela pequena para criar um filtro personalizado."""
+FILTER_COLORS = {"whitelist": ACCENT, "blacklist": "#ff6666"}
+FILTER_LABELS = {"whitelist": "WhiteList", "blacklist": "BlackList"}
 
-    def __init__(self, master: tk.Misc, on_confirm):
-        self._on_confirm = on_confirm
+
+class AddFilterDialog:
+    """Janela pequena para criar um filtro personalizado (whitelist ou blacklist)."""
+
+    def __init__(self, master: tk.Misc, filter_type: str, on_confirm):
+        self._filter_type = filter_type  # "whitelist" ou "blacklist"
+        self._on_confirm  = on_confirm
 
         self.root = tk.Toplevel(master)
-        self.root.title("Adicionar filtro")
+        label = FILTER_LABELS[filter_type]
+        self.root.title(f"Adicionar {label}")
         self.root.configure(bg=BG)
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
@@ -321,7 +327,9 @@ class AddFilterDialog:
     def _build_ui(self) -> None:
         pad = dict(padx=14, pady=6)
 
-        tk.Label(self.root, text="Adicionar filtro", bg=BG, fg=ACCENT,
+        color = FILTER_COLORS[self._filter_type]
+        label = FILTER_LABELS[self._filter_type]
+        tk.Label(self.root, text=f"Adicionar {label}", bg=BG, fg=color,
                  font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
 
         row_name = tk.Frame(self.root, bg=BG, **pad)
@@ -341,7 +349,7 @@ class AddFilterDialog:
         btn_row = tk.Frame(self.root, bg=BG, padx=14, pady=8)
         btn_row.pack(fill="x")
         tk.Button(btn_row, text="Adicionar", command=self._confirm,
-                  bg=ACCENT, fg="#000", relief="flat", padx=12, pady=4, cursor="hand2").pack(side="left", padx=(0, 6))
+                  bg=color, fg="#000", relief="flat", padx=12, pady=4, cursor="hand2").pack(side="left", padx=(0, 6))
         tk.Button(btn_row, text="Cancelar", command=self.root.destroy,
                   bg=BG_PANEL, fg=FG, relief="flat", padx=12, pady=4, cursor="hand2").pack(side="left")
 
@@ -349,7 +357,7 @@ class AddFilterDialog:
         name = self._name_var.get().strip()
         keyword = self._kw_var.get().strip()
         if name and keyword:
-            self._on_confirm(name, keyword)
+            self._on_confirm(name, keyword, self._filter_type)
             self.root.destroy()
 
 
@@ -379,7 +387,7 @@ class FiltersDialog:
 
         tk.Label(
             self.root,
-            text="Filtros ativos mostram apenas mensagens com a palavra-chave.",
+            text="WhiteList: mostra só mensagens com a palavra.  BlackList: oculta mensagens com a palavra.",
             bg=BG, fg=FG_DIM, font=("Segoe UI", 8), padx=14,
         ).pack(anchor="w")
 
@@ -417,11 +425,25 @@ class FiltersDialog:
 
         bottom = tk.Frame(self.root, bg=BG, padx=14, pady=4)
         bottom.pack(fill="x")
-        tk.Button(bottom, text="+ Adicionar filtro", command=self._open_add_filter,
-                  bg=BG_PANEL, fg=ACCENT, relief="flat", padx=10, pady=4, cursor="hand2",
-                  activebackground=ACCENT, activeforeground="#000").pack(side="left")
-        tk.Button(bottom, text="Fechar", command=self.root.destroy,
-                  bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2").pack(side="right")
+
+        tk.Button(
+            bottom, text="+ WhiteList",
+            command=lambda: self._open_add_filter("whitelist"),
+            bg=BG_PANEL, fg=ACCENT, relief="flat", padx=10, pady=4, cursor="hand2",
+            activebackground=ACCENT, activeforeground="#000",
+        ).pack(side="left", padx=(0, 6))
+
+        tk.Button(
+            bottom, text="+ BlackList",
+            command=lambda: self._open_add_filter("blacklist"),
+            bg=BG_PANEL, fg="#ff6666", relief="flat", padx=10, pady=4, cursor="hand2",
+            activebackground="#ff6666", activeforeground="#000",
+        ).pack(side="left")
+
+        tk.Button(
+            bottom, text="Fechar", command=self.root.destroy,
+            bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2",
+        ).pack(side="right")
 
         self.root.update_idletasks()
 
@@ -448,17 +470,31 @@ class FiltersDialog:
         for w in self._list_frame.winfo_children():
             w.destroy()
 
+        if not self._filters:
+            tk.Label(self._list_frame, text="Nenhum filtro criado ainda.",
+                     bg=BG, fg=FG_DIM, font=FONT_UI).pack(pady=6)
+            return
+
         for f in self._filters:
+            ftype  = f.get("type", "whitelist")
+            fcolor = FILTER_COLORS[ftype]
+            flabel = FILTER_LABELS[ftype]
+
             row = tk.Frame(self._list_frame, bg=BG_PANEL, padx=10, pady=8)
             row.pack(fill="x", pady=(0, 6))
 
-            f["var"].trace_add("write", lambda *_, v=f["var"]: self._on_toggle())
+            f["var"].trace_add("write", lambda *_: self._on_toggle())
+
+            tk.Label(
+                row, text=f"[{flabel}]",
+                bg=BG_PANEL, fg=fcolor, font=("Segoe UI", 7, "bold"),
+            ).pack(side="left", padx=(0, 6))
 
             tk.Checkbutton(
                 row, text=f["name"],
                 variable=f["var"],
                 bg=BG_PANEL, fg=FG, selectcolor=BG,
-                activebackground=BG_PANEL, activeforeground=ACCENT,
+                activebackground=BG_PANEL, activeforeground=fcolor,
                 font=FONT_UI, cursor="hand2",
             ).pack(side="left")
 
@@ -467,22 +503,19 @@ class FiltersDialog:
                 bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 8),
             ).pack(side="right")
 
-        if not self._filters:
-            tk.Label(self._list_frame, text="Nenhum filtro criado ainda.",
-                     bg=BG, fg=FG_DIM, font=FONT_UI).pack(pady=6)
-
     def _on_toggle(self) -> None:
         if self._overlay:
             self._overlay.clear_messages()
 
-    def _open_add_filter(self) -> None:
-        AddFilterDialog(master=self.root, on_confirm=self._add_filter)
+    def _open_add_filter(self, filter_type: str) -> None:
+        AddFilterDialog(master=self.root, filter_type=filter_type, on_confirm=self._add_filter)
 
-    def _add_filter(self, name: str, keyword: str) -> None:
+    def _add_filter(self, name: str, keyword: str, filter_type: str) -> None:
         self._filters.append({
-            "name": name,
+            "name":    name,
             "keyword": keyword,
-            "var": tk.BooleanVar(value=False),
+            "type":    filter_type,
+            "var":     tk.BooleanVar(value=False),
         })
         self._render_filters()
         if self._overlay:
@@ -789,10 +822,8 @@ class ControlPanel:
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Filtros — cada entrada: name, keyword, var (BooleanVar)
-        self._filters: list[dict] = [
-            {"name": "Jogadores próximos", "keyword": "dice", "var": tk.BooleanVar(value=False)},
-        ]
+        # Filtros — cada entrada: name, keyword, type ("whitelist"|"blacklist"), var (BooleanVar)
+        self._filters: list[dict] = []
         self._ignore_self: dict = {"var": tk.BooleanVar(value=False), "name": ""}
         self._translation: dict = {
             "enabled":      tk.BooleanVar(value=False),
@@ -1059,14 +1090,19 @@ class ControlPanel:
     # ── Drenagem da fila → overlay ────────────────────────────────────────────
 
     def _drain_queue(self) -> None:
-        active = [f for f in self._filters if f["var"].get()]
+        whitelist   = [f for f in self._filters if f["var"].get() and f.get("type") == "whitelist"]
+        blacklist   = [f for f in self._filters if f["var"].get() and f.get("type") == "blacklist"]
         ignore_name = self._ignore_self["name"].lower() if self._ignore_self["var"].get() else ""
         while not self._display_queue.empty():
             original, translated = self._display_queue.get_nowait()
-            # Filtros sempre aplicados no texto original (antes da tradução)
-            if active and not any(f["keyword"].lower() in original.text.lower() for f in active):
+            text_low = original.text.lower()
+            # WhiteList: se há algum ativo, mensagem precisa conter pelo menos uma palavra-chave
+            if whitelist and not any(f["keyword"].lower() in text_low for f in whitelist):
                 continue
-            if ignore_name and original.text.lower().startswith(ignore_name):
+            # BlackList: descarta mensagem se contiver qualquer palavra-chave ativa
+            if any(f["keyword"].lower() in text_low for f in blacklist):
+                continue
+            if ignore_name and text_low.startswith(ignore_name):
                 continue
             if self._overlay:
                 self._overlay.add_message(translated.text)
