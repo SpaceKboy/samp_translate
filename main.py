@@ -33,6 +33,7 @@ import win32con
 
 from window_overlay import SelectorDialog, ChatOverlay, get_window_rect
 from samp_chat import SampChatReader, ChatMessage
+from config import ConfigManager
 
 # ── Paleta ───────────────────────────────────────────────────────────────────
 
@@ -130,7 +131,7 @@ class ChatPositionDialog:
 
     def _build_ui(self) -> None:
         # coordenadas
-        coords = tk.Frame(self.root, bg=BG, padx=14, pady=10)
+        coords = tk.Frame(self.root, bg=BG, padx=14, pady=10)   
         coords.pack(fill="x")
 
         tk.Label(coords, text="X:", bg=BG, fg=FG, font=FONT_UI).grid(row=0, column=0, sticky="w")
@@ -1254,6 +1255,257 @@ class ShortcutsDialog:
         self.root.destroy()
 
 
+# ── Diálogo de presets ────────────────────────────────────────────────────────
+
+class PresetsDialog:
+    """Gerencia presets de configuração: salvar, carregar, renomear, exportar, importar."""
+
+    def __init__(self, master: tk.Misc, config: ConfigManager, panel, overlay):
+        self._config  = config
+        self._panel   = panel
+        self._overlay = overlay
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Presets de configuração")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+
+        self._build_ui()
+        self.root.grab_set()
+
+    def _build_ui(self) -> None:
+        tk.Label(self.root, text="Presets", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
+
+        tk.Label(
+            self.root,
+            text='Selecione um preset na lista e use os botões abaixo para gerenciá-lo.',
+            bg=BG, fg=FG_DIM, font=("Segoe UI", 8), padx=14,
+        ).pack(anchor="w", pady=(0, 6))
+
+        # Lista
+        list_frame = tk.Frame(self.root, bg=BG_PANEL, padx=12, pady=10)
+        list_frame.pack(fill="x", padx=14, pady=(0, 8))
+
+        tk.Label(list_frame, text="Presets salvos:", bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+
+        self._listbox = tk.Listbox(
+            list_frame, bg=BG, fg=FG,
+            selectbackground=ACCENT, selectforeground="#000",
+            font=FONT_UI, relief="flat", height=7, activestyle="none",
+            highlightthickness=0,
+        )
+        self._listbox.pack(fill="x", pady=(4, 0))
+        self._refresh_list()
+
+        # Botões
+        btn_frame = tk.Frame(self.root, bg=BG, padx=14, pady=4)
+        btn_frame.pack(fill="x")
+
+        _btn = dict(relief="flat", padx=8, pady=5, cursor="hand2",
+                    activebackground=ACCENT, activeforeground="#000")
+
+        row1 = tk.Frame(btn_frame, bg=BG)
+        row1.pack(fill="x", pady=(0, 4))
+        tk.Button(row1, text="Salvar atual", command=self._save_current,
+                  bg=ACCENT, fg="#000", **_btn).pack(side="left", padx=(0, 4))
+        tk.Button(row1, text="Carregar", command=self._load_selected,
+                  bg=BG_PANEL, fg=FG, **_btn).pack(side="left", padx=(0, 4))
+        tk.Button(row1, text="Novo preset", command=self._new_preset,
+                  bg=BG_PANEL, fg=FG, **_btn).pack(side="left")
+
+        row2 = tk.Frame(btn_frame, bg=BG)
+        row2.pack(fill="x", pady=(0, 4))
+        tk.Button(row2, text="Renomear", command=self._rename_preset,
+                  bg=BG_PANEL, fg=FG, **_btn).pack(side="left", padx=(0, 4))
+        tk.Button(row2, text="Deletar", command=self._delete_preset,
+                  bg=BG_PANEL, fg="#ff6666",
+                  activebackground="#ff6666", activeforeground="#000",
+                  **{k: v for k, v in _btn.items() if k not in ("activebackground", "activeforeground")},
+                  ).pack(side="left")
+
+        row3 = tk.Frame(btn_frame, bg=BG)
+        row3.pack(fill="x", pady=(0, 8))
+        tk.Button(row3, text="Exportar", command=self._export_preset,
+                  bg=BG_PANEL, fg=FG, **_btn).pack(side="left", padx=(0, 4))
+        tk.Button(row3, text="Importar", command=self._import_preset,
+                  bg=BG_PANEL, fg=FG, **_btn).pack(side="left")
+
+        tk.Button(self.root, text="Fechar", command=self.root.destroy,
+                  bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2",
+                  ).pack(pady=(0, 10))
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _refresh_list(self) -> None:
+        self._listbox.delete(0, tk.END)
+        active = self._config.active_preset
+        for i, name in enumerate(self._config.preset_names):
+            self._listbox.insert(tk.END, f"● {name}" if name == active else f"  {name}")
+            if name == active:
+                self._listbox.selection_set(i)
+
+    def _selected_name(self) -> str | None:
+        sel = self._listbox.curselection()
+        if not sel:
+            return None
+        return self._listbox.get(sel[0])[2:]  # remove "● " ou "  "
+
+    def _ask_name(self, title: str, initial: str = "") -> str | None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+
+        var    = tk.StringVar(value=initial)
+        result: list[str | None] = [None]
+
+        tk.Label(dialog, text=title, bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 10, "bold"), padx=14, pady=10).pack(anchor="w")
+
+        row = tk.Frame(dialog, bg=BG, padx=14, pady=6)
+        row.pack(fill="x")
+        entry = tk.Entry(row, textvariable=var, width=28,
+                         bg=BG_PANEL, fg=FG, relief="flat", insertbackground=FG)
+        entry.pack(fill="x")
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        def _confirm():
+            v = var.get().strip()
+            if v:
+                result[0] = v
+                dialog.destroy()
+
+        entry.bind("<Return>", lambda _: _confirm())
+        entry.bind("<Escape>", lambda _: dialog.destroy())
+
+        btn_row = tk.Frame(dialog, bg=BG, padx=14, pady=8)
+        btn_row.pack(fill="x")
+        tk.Button(btn_row, text="Confirmar", command=_confirm,
+                  bg=ACCENT, fg="#000", relief="flat", padx=10, pady=4,
+                  cursor="hand2").pack(side="left", padx=(0, 6))
+        tk.Button(btn_row, text="Cancelar", command=dialog.destroy,
+                  bg=BG_PANEL, fg=FG, relief="flat", padx=10, pady=4,
+                  cursor="hand2").pack(side="left")
+
+        dialog.wait_window()
+        return result[0]
+
+    def _warn(self, msg: str) -> None:
+        from tkinter import messagebox
+        messagebox.showwarning("Aviso", msg, parent=self.root)
+
+    def _ask_yes_no(self, msg: str) -> bool:
+        from tkinter import messagebox
+        return messagebox.askyesno("Confirmar", msg, parent=self.root)
+
+    # ── Ações ─────────────────────────────────────────────────────────────────
+
+    def _save_current(self) -> None:
+        name = self._selected_name()
+        if not name:
+            self._warn("Selecione um preset na lista para salvar.")
+            return
+        self._config.save_current(name, self._panel, self._overlay)
+        self._config.save()
+        self._refresh_list()
+
+    def _load_selected(self) -> None:
+        name = self._selected_name()
+        if not name:
+            self._warn("Selecione um preset na lista para carregar.")
+            return
+        self._config.apply(name, self._panel, self._overlay)
+        self._config.save()
+        self._refresh_list()
+
+    def _new_preset(self) -> None:
+        name = self._ask_name("Nome do novo preset")
+        if not name:
+            return
+        if name in self._config.preset_names:
+            self._warn(f'Já existe um preset chamado "{name}".')
+            return
+        self._config.save_current(name, self._panel, self._overlay)
+        self._config.set_active(name)
+        self._config.save()
+        self._refresh_list()
+
+    def _rename_preset(self) -> None:
+        old = self._selected_name()
+        if not old:
+            self._warn("Selecione um preset para renomear.")
+            return
+        new = self._ask_name("Renomear preset", initial=old)
+        if not new or new == old:
+            return
+        if new in self._config.preset_names:
+            self._warn(f'Já existe um preset chamado "{new}".')
+            return
+        self._config.rename(old, new)
+        self._config.save()
+        self._refresh_list()
+
+    def _delete_preset(self) -> None:
+        name = self._selected_name()
+        if not name:
+            self._warn("Selecione um preset para deletar.")
+            return
+        if len(self._config.preset_names) <= 1:
+            self._warn("É necessário ter pelo menos um preset.")
+            return
+        if not self._ask_yes_no(f'Deletar preset "{name}"?'):
+            return
+        self._config.delete(name)
+        self._config.save()
+        self._refresh_list()
+
+    def _export_preset(self) -> None:
+        name = self._selected_name()
+        if not name:
+            self._warn("Selecione um preset para exportar.")
+            return
+        from tkinter import filedialog, messagebox
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Exportar preset",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("Todos", "*.*")],
+            initialfile=f"{name}.json",
+        )
+        if not path:
+            return
+        try:
+            self._config.export_preset(name, path)
+            messagebox.showinfo("Exportado", f'Preset "{name}" exportado com sucesso!',
+                                parent=self.root)
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao exportar: {e}", parent=self.root)
+
+    def _import_preset(self) -> None:
+        from tkinter import filedialog, messagebox
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Importar preset",
+            filetypes=[("JSON", "*.json"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            name = self._config.import_preset(path)
+            self._config.save()
+            self._refresh_list()
+            messagebox.showinfo("Importado", f'Preset "{name}" importado com sucesso!',
+                                parent=self.root)
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao importar: {e}", parent=self.root)
+
+
 # ── Painel de controle (menu externo) ────────────────────────────────────────
 
 class ControlPanel:
@@ -1295,15 +1547,52 @@ class ControlPanel:
         self._filters_enabled: bool = True
         self._shortcuts: dict = {"chat_key": "y", "toggle_key": "z", "clear_key": "", "filters_key": ""}
 
+        self._config = ConfigManager()
+        self._full_ui_built = False
         self._build_ui()
+        self._apply_startup_config()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
+        self._build_launcher_ui()
+
+    def _build_launcher_ui(self) -> None:
+        for w in self.root.winfo_children():
+            w.destroy()
+
+        header = tk.Frame(self.root, bg=BG, padx=16, pady=16)
+        header.pack(fill="x")
+        tk.Label(header, text="SAMP Translate", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 14, "bold")).pack()
+        tk.Label(header, text="Overlay de tradução para SA-MP", bg=BG, fg=FG_DIM,
+                 font=("Segoe UI", 9)).pack(pady=(2, 0))
+
+        tk.Frame(self.root, bg=BG_PANEL, height=1).pack(fill="x", padx=10)
+
+        body = tk.Frame(self.root, bg=BG, padx=16, pady=18)
+        body.pack(fill="x")
+        tk.Label(
+            body,
+            text="Selecione a janela do GTA SA\npara começar.",
+            bg=BG, fg=FG_DIM, font=FONT_UI, justify="center",
+        ).pack(pady=(0, 14))
+        tk.Button(
+            body, text="Selecionar janela GTA",
+            command=self._select_window,
+            bg=ACCENT, fg="#000", relief="flat", padx=8, pady=10,
+            font=("Segoe UI", 9, "bold"),
+            activebackground="#00cc00", activeforeground="#000",
+            cursor="hand2",
+        ).pack(fill="x")
+
+    def _build_full_ui(self, window_title: str) -> None:
+        for w in self.root.winfo_children():
+            w.destroy()
+
         # cabeçalho
         header = tk.Frame(self.root, bg=BG, padx=12, pady=8)
         header.pack(fill="x")
-
         tk.Label(
             header, text="SAMP Translate",
             bg=BG, fg=ACCENT, font=("Segoe UI", 12, "bold"),
@@ -1314,72 +1603,45 @@ class ControlPanel:
         status.pack(fill="x", padx=10, pady=(0, 6))
 
         self._dot = tk.Label(
-            status, text="●", bg=BG_PANEL, fg="red", font=("Segoe UI", 10),
+            status, text="●", bg=BG_PANEL, fg="orange", font=("Segoe UI", 10),
         )
         self._dot.grid(row=0, column=0, padx=(0, 5))
 
         self._lbl_status = tk.Label(
-            status, text="Desconectado", bg=BG_PANEL, fg=FG, font=FONT_UI,
+            status, text="Conectando…", bg=BG_PANEL, fg=FG, font=FONT_UI,
         )
         self._lbl_status.grid(row=0, column=1, sticky="w")
 
         self._lbl_window = tk.Label(
-            status, text="Nenhuma janela selecionada",
+            status, text=window_title,
             bg=BG_PANEL, fg=FG_DIM, font=FONT_UI,
         )
         self._lbl_window.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        # botão de seleção
+        # botões
         btn_frame = tk.Frame(self.root, bg=BG, padx=10, pady=8)
         btn_frame.pack(fill="x")
 
-        tk.Button(
-            btn_frame, text="Selecionar janela GTA",
-            command=self._select_window,
-            bg=BG_PANEL, fg=FG, relief="flat", padx=8, pady=6,
-            activebackground=ACCENT, activeforeground="#000",
-            cursor="hand2",
-        ).pack(fill="x")
+        _btn = dict(relief="flat", padx=8, pady=4, cursor="hand2",
+                    activebackground=ACCENT, activeforeground="#000")
+
+        for label, cmd in [
+            ("Customizar",  self._open_chat_menu),
+            ("Tradução",    self._open_translation_dialog),
+            ("Filtros",     self._open_filters_dialog),
+            ("Atalhos",     self._open_shortcuts_dialog),
+            ("Presets",     self._open_presets_dialog),
+        ]:
+            tk.Button(btn_frame, text=label, command=cmd,
+                      bg=BG_PANEL, fg=FG_DIM, **_btn).pack(fill="x", pady=(4, 0))
 
         tk.Button(
-            btn_frame, text="Customizar",
-            command=self._open_chat_menu,
-            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
-            activebackground=ACCENT, activeforeground="#000",
-            cursor="hand2",
-        ).pack(fill="x", pady=(4, 0))
-
-        tk.Button(
-            btn_frame, text="Tradução",
-            command=self._open_translation_dialog,
-            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
-            activebackground=ACCENT, activeforeground="#000",
-            cursor="hand2",
-        ).pack(fill="x", pady=(4, 0))
-
-        tk.Button(
-            btn_frame, text="Filtros",
-            command=self._open_filters_dialog,
-            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
-            activebackground=ACCENT, activeforeground="#000",
-            cursor="hand2",
-        ).pack(fill="x", pady=(4, 0))
-
-        tk.Button(
-            btn_frame, text="Atalhos",
-            command=self._open_shortcuts_dialog,
-            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
-            activebackground=ACCENT, activeforeground="#000",
-            cursor="hand2",
-        ).pack(fill="x", pady=(4, 0))
-
-        tk.Button(
-            btn_frame, text="Limpar chat",
-            command=self._clear_chat,
-            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
+            btn_frame, text="Limpar chat", command=self._clear_chat,
+            bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4, cursor="hand2",
             activebackground="#ff4444", activeforeground="#fff",
-            cursor="hand2",
         ).pack(fill="x", pady=(4, 0))
+
+        self._full_ui_built = True
 
     # ── Seleção de janela ─────────────────────────────────────────────────────
 
@@ -1390,8 +1652,12 @@ class ControlPanel:
             return
 
         self._hwnd = hwnd
-        title = win32gui.GetWindowText(hwnd)
-        self._lbl_window.config(text=title or f"HWND={hwnd}")
+        title = win32gui.GetWindowText(hwnd) or f"HWND={hwnd}"
+
+        if not self._full_ui_built:
+            self._build_full_ui(title)
+        else:
+            self._lbl_window.config(text=title)
 
         self._start_overlay(hwnd)
         self._start_reader()
@@ -1403,6 +1669,7 @@ class ControlPanel:
             self._overlay.stop()
         self._overlay = ChatOverlay(hwnd, master=self.root)
         self._overlay.set_translate_active(self._translate_active)
+        self._config.apply_overlay(self._config.active_preset, self._overlay)
         self._setup_chat_hook()
         self._setup_toggle_hook()
         self._setup_clear_hook()
@@ -1460,35 +1727,55 @@ class ControlPanel:
         tgt = ALL_LANGUAGES.get(self._translation["target"].get())
         if not src or not tgt or src == tgt:
             return msg
-        translator = self._argos_cache.get((src, tgt))
-        if not translator:
-            return msg
         try:
-            result = translator.translate(msg.text)
-            return dataclasses.replace(msg, text=result or msg.text)
+            # Tradução direta (cacheada)
+            t = self._argos_cache.get((src, tgt))
+            if t:
+                result = t.translate(msg.text)
+                return dataclasses.replace(msg, text=result or msg.text)
+
+            # Rota indireta via inglês (src→en→tgt)
+            if src != "en" and tgt != "en":
+                t1 = self._argos_cache.get((src, "en"))
+                t2 = self._argos_cache.get(("en", tgt))
+                if t1 and t2:
+                    result = t2.translate(t1.translate(msg.text))
+                    return dataclasses.replace(msg, text=result or msg.text)
         except Exception:
-            return msg
+            pass
+        return msg
 
     def _prewarm_translator(self, src: str, tgt: str) -> None:
-        """Carrega o modelo argostranslate em thread separada para não bloquear a fila."""
-        key = (src, tgt)
-        if key in self._argos_cache:
-            return
-
         def _worker():
             try:
                 import argostranslate.translate as at
-                installed = at.get_installed_languages()
-                from_lang = next((l for l in installed if l.code == src), None)
-                to_lang   = next((l for l in installed if l.code == tgt), None)
-                if from_lang and to_lang:
-                    t = from_lang.get_translation(to_lang)
-                    if t:
-                        self._argos_cache[key] = t
+                lang_map  = {l.code: l for l in at.get_installed_languages()}
+                from_lang = lang_map.get(src)
+                to_lang   = lang_map.get(tgt)
+                if not from_lang or not to_lang:
+                    return
+
+                # Direto
+                t = from_lang.get_translation(to_lang)
+                if t:
+                    self._argos_cache[(src, tgt)] = t
+                    return
+
+                # Indireto via inglês
+                if src != "en" and tgt != "en":
+                    en_lang = lang_map.get("en")
+                    if en_lang:
+                        t1 = from_lang.get_translation(en_lang)
+                        t2 = en_lang.get_translation(to_lang)
+                        if t1:
+                            self._argos_cache[(src, "en")] = t1
+                        if t2:
+                            self._argos_cache[("en", tgt)] = t2
             except Exception:
                 pass
 
-        threading.Thread(target=_worker, daemon=True, name="argos-prewarm").start()
+        if (src, tgt) not in self._argos_cache:
+            threading.Thread(target=_worker, daemon=True, name="argos-prewarm").start()
 
     def _on_translation_toggle(self, *_) -> None:
         if self._translation["enabled"].get():
@@ -1510,12 +1797,20 @@ class ControlPanel:
     def _check_argos_installed(self, src: str, tgt: str) -> bool:
         try:
             import argostranslate.translate as at
-            installed = at.get_installed_languages()
-            from_lang = next((l for l in installed if l.code == src), None)
-            to_lang   = next((l for l in installed if l.code == tgt), None)
+            lang_map  = {l.code: l for l in at.get_installed_languages()}
+            from_lang = lang_map.get(src)
+            to_lang   = lang_map.get(tgt)
             if not from_lang or not to_lang:
                 return False
-            return from_lang.get_translation(to_lang) is not None
+            if from_lang.get_translation(to_lang) is not None:
+                return True
+            # Rota indireta via inglês
+            if src != "en" and tgt != "en":
+                en = lang_map.get("en")
+                if en:
+                    return (from_lang.get_translation(en) is not None and
+                            en.get_translation(to_lang) is not None)
+            return False
         except Exception:
             return False
 
@@ -1524,17 +1819,25 @@ class ControlPanel:
             try:
                 import argostranslate.package as ap
                 ap.update_package_index()
-                available = ap.get_available_packages()
-                pkg = next((p for p in available
-                            if p.from_code == src and p.to_code == tgt), None)
-                if pkg:
-                    ap.install_from_path(pkg.download())
-                    self._argos_cache.pop((src, tgt), None)
-                    self._prewarm_translator(src, tgt)
-                    self.root.after(0, lambda: on_done(True))
+                avail_map = {(p.from_code, p.to_code): p for p in ap.get_available_packages()}
+
+                if (src, tgt) in avail_map:
+                    pkgs = [avail_map[(src, tgt)]]
+                elif src != "en" and tgt != "en" and (src, "en") in avail_map and ("en", tgt) in avail_map:
+                    # Rota indireta: instala src→en e en→tgt
+                    pkgs = [avail_map[(src, "en")], avail_map[("en", tgt)]]
                 else:
                     self.root.after(0, lambda: on_done(False))
-            except Exception:
+                    return
+
+                for pkg in pkgs:
+                    ap.install_from_path(pkg.download())
+
+                self._argos_cache.pop((src, tgt), None)
+                self._prewarm_translator(src, tgt)
+                self.root.after(0, lambda: on_done(True))
+            except Exception as e:
+                print(f"[argos-download] {e}")
                 self.root.after(0, lambda: on_done(False))
         threading.Thread(target=_worker, daemon=True, name="argos-download").start()
 
@@ -1816,9 +2119,22 @@ class ControlPanel:
         except Exception as e:
             print(f"[send_to_samp] {e}")
 
+    # ── Presets ───────────────────────────────────────────────────────────────
+
+    def _apply_startup_config(self) -> None:
+        self._config.apply(self._config.active_preset, self, None)
+
+    def _open_presets_dialog(self) -> None:
+        PresetsDialog(master=self.root, config=self._config, panel=self, overlay=self._overlay)
+
     # ── Encerramento ──────────────────────────────────────────────────────────
 
     def _on_close(self) -> None:
+        try:
+            self._config.save_current(self._config.active_preset, self, self._overlay)
+            self._config.save()
+        except Exception:
+            pass
         for hook in (self._kb_hook, self._toggle_kb_hook, self._clear_kb_hook, self._filters_kb_hook):
             if hook is not None:
                 try:
