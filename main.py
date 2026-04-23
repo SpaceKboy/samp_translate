@@ -674,15 +674,121 @@ class PlayerNameDialog:
 
 # ── Menu Chat ────────────────────────────────────────────────────────────────
 
-class ChatMenuDialog:
-    """Janela de opções do chat — posição e estilo."""
+# ── Diálogo de customização do overlay de status ─────────────────────────────
+
+class StatusOverlayDialog:
+    """Ajusta posição, tamanho e visibilidade do indicador SAMP AUTO TRANSLATE."""
+
+    STEP = 5
 
     def __init__(self, master: tk.Misc, overlay: ChatOverlay, hwnd: int):
         self._overlay = overlay
         self._hwnd    = hwnd
 
         self.root = tk.Toplevel(master)
-        self.root.title("Customizar chat")
+        self.root.title("Overlay de status")
+        self.root.configure(bg=BG)
+        self.root.resizable(False, False)
+        self.root.attributes("-topmost", True)
+
+        rect = get_window_rect(hwnd)
+        w = rect[2] if rect else 800
+        x, y = overlay.get_status_position(w)
+
+        self._visible_var = tk.BooleanVar(value=overlay.get_status_visible())
+        self._x    = tk.IntVar(value=x)
+        self._y    = tk.IntVar(value=y)
+        self._size = tk.IntVar(value=overlay.get_status_font_size())
+
+        self._build_ui()
+        self.root.grab_set()
+
+    def _build_ui(self) -> None:
+        tk.Label(self.root, text="Overlay de status", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
+
+        # ── Ativar / Desativar ─────────────────────────────────────────────
+        vis_frame = tk.Frame(self.root, bg=BG_PANEL, padx=12, pady=8)
+        vis_frame.pack(fill="x", padx=14, pady=(0, 8))
+        tk.Checkbutton(
+            vis_frame, text="Exibir overlay de status",
+            variable=self._visible_var, command=self._apply_visible,
+            bg=BG_PANEL, fg=FG, selectcolor=BG,
+            activebackground=BG_PANEL, activeforeground=ACCENT,
+            font=FONT_UI, cursor="hand2",
+        ).pack(anchor="w")
+
+        # ── Tamanho da fonte ───────────────────────────────────────────────
+        size_frame = tk.Frame(self.root, bg=BG_PANEL, padx=12, pady=8)
+        size_frame.pack(fill="x", padx=14, pady=(0, 8))
+        tk.Label(size_frame, text="Tamanho:", bg=BG_PANEL, fg=FG,
+                 font=FONT_UI, width=10, anchor="w").pack(side="left")
+        tk.Spinbox(
+            size_frame, from_=6, to=28, textvariable=self._size, width=5,
+            command=self._apply_size,
+            bg=BG, fg=FG, relief="flat", buttonbackground=BG_PANEL,
+        ).pack(side="left")
+
+        # ── Posição ───────────────────────────────────────────────────────
+        pos_frame = tk.Frame(self.root, bg=BG_PANEL, padx=12, pady=8)
+        pos_frame.pack(fill="x", padx=14, pady=(0, 8))
+
+        tk.Label(pos_frame, text="Posição", bg=BG_PANEL, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Frame(pos_frame, bg="#2a2a4a", height=1).pack(fill="x", pady=(4, 8))
+
+        coords = tk.Frame(pos_frame, bg=BG_PANEL)
+        coords.pack(fill="x")
+        tk.Label(coords, text="X:", bg=BG_PANEL, fg=FG, font=FONT_UI).grid(row=0, column=0, sticky="w")
+        tk.Spinbox(coords, from_=0, to=9999, textvariable=self._x, width=6,
+                   command=self._apply_position, bg=BG, fg=FG, relief="flat",
+                   buttonbackground=BG_PANEL).grid(row=0, column=1, padx=(4, 20))
+        tk.Label(coords, text="Y:", bg=BG_PANEL, fg=FG, font=FONT_UI).grid(row=0, column=2, sticky="w")
+        tk.Spinbox(coords, from_=0, to=9999, textvariable=self._y, width=6,
+                   command=self._apply_position, bg=BG, fg=FG, relief="flat",
+                   buttonbackground=BG_PANEL).grid(row=0, column=3, padx=(4, 0))
+
+        dpad = tk.Frame(pos_frame, bg=BG_PANEL, pady=6)
+        dpad.pack()
+        _btn = dict(bg=BG, fg=FG, relief="flat", width=3,
+                    font=("Segoe UI", 13), cursor="hand2",
+                    activebackground=ACCENT, activeforeground="#000")
+        tk.Button(dpad, text="↑", command=self._move_up,    **_btn).grid(row=0, column=1, padx=3, pady=3)
+        tk.Button(dpad, text="←", command=self._move_left,  **_btn).grid(row=1, column=0, padx=3, pady=3)
+        tk.Label( dpad, text="·", bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 13), width=3).grid(row=1, column=1)
+        tk.Button(dpad, text="→", command=self._move_right, **_btn).grid(row=1, column=2, padx=3, pady=3)
+        tk.Button(dpad, text="↓", command=self._move_down,  **_btn).grid(row=2, column=1, padx=3, pady=3)
+
+        tk.Button(self.root, text="Fechar", command=self.root.destroy,
+                  bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2",
+                  ).pack(pady=(2, 10))
+
+    def _apply_visible(self) -> None:
+        self._overlay.set_status_visible(self._visible_var.get())
+
+    def _apply_size(self) -> None:
+        self._overlay.set_status_font_size(self._size.get())
+
+    def _apply_position(self) -> None:
+        self._overlay.set_status_position(self._x.get(), self._y.get())
+
+    def _move_up(self)    -> None: self._y.set(max(0, self._y.get() - self.STEP)); self._apply_position()
+    def _move_down(self)  -> None: self._y.set(self._y.get() + self.STEP);         self._apply_position()
+    def _move_left(self)  -> None: self._x.set(max(0, self._x.get() - self.STEP)); self._apply_position()
+    def _move_right(self) -> None: self._x.set(self._x.get() + self.STEP);         self._apply_position()
+
+
+# ── Menu Chat ────────────────────────────────────────────────────────────────
+
+class ChatMenuDialog:
+    """Janela de customização — chat e overlay de status."""
+
+    def __init__(self, master: tk.Misc, overlay: ChatOverlay, hwnd: int):
+        self._overlay = overlay
+        self._hwnd    = hwnd
+
+        self.root = tk.Toplevel(master)
+        self.root.title("Customizar")
         self.root.configure(bg=BG)
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
@@ -690,7 +796,7 @@ class ChatMenuDialog:
         self._build_ui()
 
     def _build_ui(self) -> None:
-        tk.Label(self.root, text="Customizar chat", bg=BG, fg=ACCENT,
+        tk.Label(self.root, text="Customizar", bg=BG, fg=ACCENT,
                  font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
 
         btn_frame = tk.Frame(self.root, bg=BG, padx=14, pady=4)
@@ -706,6 +812,9 @@ class ChatMenuDialog:
                   bg=BG_PANEL, fg=FG, **_btn).pack(fill="x", pady=(6, 0))
 
         tk.Button(btn_frame, text="Editar chat", command=self._open_style,
+                  bg=BG_PANEL, fg=FG, **_btn).pack(fill="x", pady=(6, 0))
+
+        tk.Button(btn_frame, text="Overlay de status", command=self._open_status_overlay,
                   bg=BG_PANEL, fg=FG, **_btn).pack(fill="x", pady=(6, 12))
 
     def _open_position(self) -> None:
@@ -716,6 +825,9 @@ class ChatMenuDialog:
 
     def _open_style(self) -> None:
         ChatStyleDialog(master=self.root, overlay=self._overlay)
+
+    def _open_status_overlay(self) -> None:
+        StatusOverlayDialog(master=self.root, overlay=self._overlay, hwnd=self._hwnd)
 
 
 # ── Diálogo de tradução ───────────────────────────────────────────────────────
@@ -980,10 +1092,10 @@ class ShortcutsDialog:
     })
 
     def __init__(self, master: tk.Misc, shortcuts: dict, on_change):
-        self._shortcuts  = shortcuts   # {"chat_key": "y", ...}
-        self._on_change  = on_change
-        self._listening  = False
-        self._hook       = None
+        self._shortcuts        = shortcuts
+        self._on_change        = on_change   # on_change(key_name: str)
+        self._hook             = None
+        self._listening_target = None   # {"key_name", "label", "btn"}
 
         self.root = tk.Toplevel(master)
         self.root.title("Atalhos")
@@ -998,23 +1110,61 @@ class ShortcutsDialog:
     def _build_ui(self) -> None:
         tk.Label(self.root, text="Atalhos", bg=BG, fg=ACCENT,
                  font=("Segoe UI", 11, "bold"), padx=14, pady=10).pack(anchor="w")
-
         tk.Label(
             self.root,
-            text="Clique em 'Alterar' e pressione a nova tecla desejada.",
+            text="Clique em 'Alterar' e pressione a nova tecla.  ESC remove o atalho.",
             bg=BG, fg=FG_DIM, font=("Segoe UI", 8), padx=14,
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(0, 6))
 
+        self._build_shortcut_row(
+            key_name="chat_key",
+            title="Chat de texto",
+            description="Abre o campo de envio de mensagem enquanto o GTA está em foco.",
+        )
+        self._build_shortcut_row(
+            key_name="toggle_key",
+            title="Ativar / Desativar tradução",
+            description="Liga e desliga o SAMP Auto Translate enquanto o GTA está em foco.",
+        )
+        self._build_shortcut_row(
+            key_name="clear_key",
+            title="Limpar chat",
+            description="Limpa todas as mensagens do overlay de chat.",
+        )
+        self._build_shortcut_row(
+            key_name="filters_key",
+            title="Ativar / Desativar filtros",
+            description="Liga e desliga todos os filtros de chat de uma vez.",
+        )
+
+        tk.Button(
+            self.root, text="Fechar", command=self._on_close,
+            bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2",
+        ).pack(pady=(4, 10))
+
+    def _key_display(self, key_name: str) -> tuple[str, str]:
+        """Retorna (texto, cor) para o label de tecla."""
+        val = self._shortcuts.get(key_name, "")
+        return (val.upper(), ACCENT) if val else ("─", FG_DIM)
+
+    def _restore_label(self, target: dict) -> None:
+        key_name = target["key_name"]
+        text, color = self._key_display(key_name)
+        target["label"].config(text=text, fg=color)
+        target["btn"].config(
+            text="Alterar", fg=FG, activebackground=ACCENT,
+            command=lambda kn=key_name, kl=target["label"], b=target["btn"]:
+                self._start_listening(kn, kl, b),
+        )
+
+    def _build_shortcut_row(self, key_name: str, title: str, description: str) -> None:
         section = tk.Frame(self.root, bg=BG_PANEL, padx=12, pady=10)
-        section.pack(fill="x", padx=14, pady=(8, 8))
+        section.pack(fill="x", padx=14, pady=(0, 8))
 
-        tk.Label(section, text="Chat de texto", bg=BG_PANEL, fg=FG,
+        tk.Label(section, text=title, bg=BG_PANEL, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        tk.Label(
-            section,
-            text="Abre o campo de envio de mensagem enquanto o GTA está em foco.",
-            bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 8),
-        ).pack(anchor="w", pady=(2, 6))
+        tk.Label(section, text=description, bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 6))
         tk.Frame(section, bg="#2a2a4a", height=1).pack(fill="x", pady=(0, 8))
 
         row = tk.Frame(section, bg=BG_PANEL)
@@ -1023,34 +1173,26 @@ class ShortcutsDialog:
         tk.Label(row, text="Tecla:", bg=BG_PANEL, fg=FG_DIM,
                  font=FONT_UI, width=8, anchor="w").pack(side="left")
 
-        self._key_label = tk.Label(
-            row, text=self._shortcuts["chat_key"].upper(),
-            bg=BG, fg=ACCENT, font=("Consolas", 12, "bold"),
-            width=6, relief="flat", padx=6, pady=3,
+        text, color = self._key_display(key_name)
+        key_label = tk.Label(
+            row, text=text, bg=BG, fg=color,
+            font=("Consolas", 12, "bold"), width=6, relief="flat", padx=6, pady=3,
         )
-        self._key_label.pack(side="left", padx=(0, 10))
+        key_label.pack(side="left", padx=(0, 10))
 
-        self._btn_change = tk.Button(
-            row, text="Alterar",
-            command=self._start_listening,
-            bg=BG_PANEL, fg=FG, relief="flat", padx=10, pady=4,
-            activebackground=ACCENT, activeforeground="#000", cursor="hand2",
-        )
-        self._btn_change.pack(side="left")
+        btn = tk.Button(row, text="Alterar", bg=BG_PANEL, fg=FG,
+                        relief="flat", padx=10, pady=4,
+                        activebackground=ACCENT, activeforeground="#000", cursor="hand2")
+        btn.config(command=lambda kn=key_name, kl=key_label, b=btn: self._start_listening(kn, kl, b))
+        btn.pack(side="left")
 
-        tk.Button(
-            self.root, text="Fechar", command=self._on_close,
-            bg=BG_PANEL, fg=FG, relief="flat", padx=14, pady=4, cursor="hand2",
-        ).pack(pady=(4, 10))
-
-    def _start_listening(self) -> None:
-        if self._listening:
+    def _start_listening(self, key_name: str, label: tk.Label, btn: tk.Button) -> None:
+        if self._listening_target is not None:
             return
-        self._listening = True
-        self._key_label.config(text="...", fg=FG_DIM)
-        self._btn_change.config(text="Cancelar", fg="#ff6666",
-                                activebackground="#ff6666",
-                                command=self._cancel_listening)
+        self._listening_target = {"key_name": key_name, "label": label, "btn": btn}
+        label.config(text="...", fg=FG_DIM)
+        btn.config(text="Cancelar", fg="#ff6666", activebackground="#ff6666",
+                   command=self._cancel_listening)
         try:
             import keyboard as kb
 
@@ -1058,6 +1200,9 @@ class ShortcutsDialog:
                 if event.event_type != kb.KEY_DOWN:
                     return
                 name = event.name.lower()
+                if name in ("escape", "esc"):
+                    self.root.after(0, self._clear_key)
+                    return
                 if name in self._IGNORE_KEYS:
                     return
                 self.root.after(0, lambda n=name: self._apply_key(n))
@@ -1067,22 +1212,33 @@ class ShortcutsDialog:
             self._cancel_listening()
 
     def _apply_key(self, name: str) -> None:
+        if self._listening_target is None:
+            return
+        target = self._listening_target
         self._stop_hook()
-        self._listening = False
-        self._shortcuts["chat_key"] = name
-        self._key_label.config(text=name.upper(), fg=ACCENT)
-        self._btn_change.config(text="Alterar", fg=FG,
-                                activebackground=ACCENT,
-                                command=self._start_listening)
-        self._on_change()
+        self._listening_target = None
+        self._shortcuts[target["key_name"]] = name
+        self._restore_label(target)
+        self._on_change(target["key_name"])
+
+    def _clear_key(self) -> None:
+        """Remove a tecla do atalho (pressionando ESC durante a captura)."""
+        if self._listening_target is None:
+            return
+        target = self._listening_target
+        self._stop_hook()
+        self._listening_target = None
+        self._shortcuts[target["key_name"]] = ""
+        self._restore_label(target)
+        self._on_change(target["key_name"])
 
     def _cancel_listening(self) -> None:
+        if self._listening_target is None:
+            return
+        target = self._listening_target
         self._stop_hook()
-        self._listening = False
-        self._key_label.config(text=self._shortcuts["chat_key"].upper(), fg=ACCENT)
-        self._btn_change.config(text="Alterar", fg=FG,
-                                activebackground=ACCENT,
-                                command=self._start_listening)
+        self._listening_target = None
+        self._restore_label(target)
 
     def _stop_hook(self) -> None:
         if self._hook is not None:
@@ -1132,7 +1288,12 @@ class ControlPanel:
         self._translation["enabled"].trace_add("write", self._on_translation_toggle)
         self._translation["user_enabled"].trace_add("write", self._on_translation_toggle)
         self._kb_hook = None
-        self._shortcuts: dict = {"chat_key": "y"}
+        self._toggle_kb_hook = None
+        self._clear_kb_hook = None
+        self._filters_kb_hook = None
+        self._translate_active: bool = True
+        self._filters_enabled: bool = True
+        self._shortcuts: dict = {"chat_key": "y", "toggle_key": "z", "clear_key": "", "filters_key": ""}
 
         self._build_ui()
 
@@ -1181,7 +1342,7 @@ class ControlPanel:
         ).pack(fill="x")
 
         tk.Button(
-            btn_frame, text="Customizar chat",
+            btn_frame, text="Customizar",
             command=self._open_chat_menu,
             bg=BG_PANEL, fg=FG_DIM, relief="flat", padx=8, pady=4,
             activebackground=ACCENT, activeforeground="#000",
@@ -1241,7 +1402,11 @@ class ControlPanel:
         if self._overlay is not None:
             self._overlay.stop()
         self._overlay = ChatOverlay(hwnd, master=self.root)
+        self._overlay.set_translate_active(self._translate_active)
         self._setup_chat_hook()
+        self._setup_toggle_hook()
+        self._setup_clear_hook()
+        self._setup_filters_hook()
 
     # ── Leitor de chat (thread) ───────────────────────────────────────────────
 
@@ -1409,11 +1574,17 @@ class ControlPanel:
     # ── Drenagem da fila → overlay ────────────────────────────────────────────
 
     def _drain_queue(self) -> None:
-        whitelist   = [f for f in self._filters if f["var"].get() and f.get("type") == "whitelist"]
-        blacklist   = [f for f in self._filters if f["var"].get() and f.get("type") == "blacklist"]
+        if self._filters_enabled:
+            whitelist = [f for f in self._filters if f["var"].get() and f.get("type") == "whitelist"]
+            blacklist = [f for f in self._filters if f["var"].get() and f.get("type") == "blacklist"]
+        else:
+            whitelist = []
+            blacklist = []
         ignore_name = self._ignore_self["name"].lower() if self._ignore_self["var"].get() else ""
         while not self._display_queue.empty():
             original, translated = self._display_queue.get_nowait()
+            if not self._translate_active:
+                continue  # descarta mensagens enquanto desativado
             text_low = original.text.lower()
             # WhiteList: encontra o primeiro filtro que faz match (captura a cor)
             matched_color: str | None = None
@@ -1450,9 +1621,17 @@ class ControlPanel:
         ShortcutsDialog(master=self.root, shortcuts=self._shortcuts,
                         on_change=self._on_shortcut_change)
 
-    def _on_shortcut_change(self) -> None:
-        if self._hwnd:
+    def _on_shortcut_change(self, key_name: str) -> None:
+        if not self._hwnd:
+            return
+        if key_name == "chat_key":
             self._setup_chat_hook()
+        elif key_name == "toggle_key":
+            self._setup_toggle_hook()
+        elif key_name == "clear_key":
+            self._setup_clear_hook()
+        elif key_name == "filters_key":
+            self._setup_filters_hook()
 
     # ── Envio de mensagem (tecla configurável) ───────────────────────────────
 
@@ -1480,8 +1659,111 @@ class ControlPanel:
         except ImportError:
             pass
 
+    def _setup_toggle_hook(self) -> None:
+        """Hook global: intercepta a tecla de toggle quando GTA está em foco."""
+        try:
+            import keyboard
+
+            if self._toggle_kb_hook is not None:
+                try:
+                    keyboard.unhook(self._toggle_kb_hook)
+                except Exception:
+                    pass
+
+            key = self._shortcuts["toggle_key"]
+
+            def _handler(event):
+                try:
+                    if win32gui.GetForegroundWindow() == self._hwnd:
+                        self.root.after(0, self._toggle_translate)
+                except Exception:
+                    pass
+
+            self._toggle_kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
+        except ImportError:
+            pass
+
+    def _setup_clear_hook(self) -> None:
+        """Hook global: intercepta a tecla de limpar chat quando GTA está em foco."""
+        try:
+            import keyboard
+
+            if self._clear_kb_hook is not None:
+                try:
+                    keyboard.unhook(self._clear_kb_hook)
+                except Exception:
+                    pass
+
+            key = self._shortcuts.get("clear_key", "")
+            if not key:
+                self._clear_kb_hook = None
+                return
+
+            def _handler(event):
+                try:
+                    if win32gui.GetForegroundWindow() == self._hwnd:
+                        self.root.after(0, self._clear_chat_hotkey)
+                except Exception:
+                    pass
+
+            self._clear_kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
+        except ImportError:
+            pass
+
+    def _setup_filters_hook(self) -> None:
+        """Hook global: intercepta a tecla de ativar/desativar filtros quando GTA está em foco."""
+        try:
+            import keyboard
+
+            if self._filters_kb_hook is not None:
+                try:
+                    keyboard.unhook(self._filters_kb_hook)
+                except Exception:
+                    pass
+
+            key = self._shortcuts.get("filters_key", "")
+            if not key:
+                self._filters_kb_hook = None
+                return
+
+            def _handler(event):
+                try:
+                    if win32gui.GetForegroundWindow() == self._hwnd:
+                        self.root.after(0, self._toggle_filters_hotkey)
+                except Exception:
+                    pass
+
+            self._filters_kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
+        except ImportError:
+            pass
+
+    def _clear_chat_hotkey(self) -> None:
+        if not self._translate_active:
+            return
+        self._clear_chat()
+        if self._overlay:
+            self._overlay.show_notification("CHAT", "LIMPO", active=True)
+
+    def _toggle_filters_hotkey(self) -> None:
+        if not self._translate_active:
+            return
+        self._filters_enabled = not self._filters_enabled
+        if self._overlay:
+            self._overlay.clear_messages()
+            if self._filters_enabled:
+                self._overlay.show_notification("FILTROS", "ON", active=True)
+            else:
+                self._overlay.show_notification("FILTROS", "OFF", active=False)
+
+    def _toggle_translate(self) -> None:
+        self._translate_active = not self._translate_active
+        if self._overlay:
+            self._overlay.set_translate_active(self._translate_active)
+            if not self._translate_active:
+                self._overlay.clear_messages()
+
     def _show_send_input(self) -> None:
-        if self._overlay is None:
+        if self._overlay is None or not self._translate_active:
             return
         self._overlay.show_input(on_submit=self._on_send_submit)
 
@@ -1537,12 +1819,13 @@ class ControlPanel:
     # ── Encerramento ──────────────────────────────────────────────────────────
 
     def _on_close(self) -> None:
-        if self._kb_hook is not None:
-            try:
-                import keyboard
-                keyboard.unhook(self._kb_hook)
-            except Exception:
-                pass
+        for hook in (self._kb_hook, self._toggle_kb_hook, self._clear_kb_hook, self._filters_kb_hook):
+            if hook is not None:
+                try:
+                    import keyboard
+                    keyboard.unhook(hook)
+                except Exception:
+                    pass
         if self._overlay:
             self._overlay.stop()
         self.root.destroy()

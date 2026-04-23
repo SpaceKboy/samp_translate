@@ -11,6 +11,7 @@ def _fix_tcl_paths():
 
 _fix_tcl_paths()
 
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 import win32gui
@@ -178,16 +179,25 @@ class ChatOverlay:
     def __init__(self, hwnd: int, master: tk.Misc | None = None):
         self._hwnd = hwnd
         self._running = True
-        self._messages: list[str] = []
+        self._messages: list[tuple[str, str | None]] = []
         self._pos_x: int | None = 48
         self._pos_y: int | None = 330
         self._input_pos_x: int | None = 48
         self._input_pos_y: int | None = 267
-
+        self._translate_active: bool = True
+        self._status_visible:   bool = True
+        self._status_font_size: int  = 9
+        self._status_pos_x: int | None = 1395
+        self._status_pos_y: int        = 855
+        self._notif_font_size: int     = 9
+        self._notif_pos_x: int | None  = None   # None = auto topo-direita
+        self._notif_pos_y: int         = 10
         self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self._configure_window()
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
+        self._create_status_widget()
+        self._create_notif_widget()
         self._update()
 
     def _configure_window(self):
@@ -197,6 +207,168 @@ class ChatOverlay:
         self.root.attributes("-alpha", 1.0)
         self.root.geometry("1x1+0+0")
         self.root.configure(bg="black")
+        self.root.after(0, self._set_click_through)
+
+    def _set_click_through(self) -> None:
+        """Intercepta WM_NCHITTEST para HTTRANSPARENT — overlay visível mas 100% click-through."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd          = self.root.winfo_id()
+            WM_NCHITTEST  = 0x0084
+            HTTRANSPARENT = -1
+            GWLP_WNDPROC  = -4
+
+            WNDPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_long,
+                wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+            )
+
+            def _proc(h, msg, wp, lp):
+                if msg == WM_NCHITTEST:
+                    return HTTRANSPARENT
+                return ctypes.windll.user32.CallWindowProcW(
+                    self._overlay_old_wndproc, h, msg, wp, lp,
+                )
+
+            self._overlay_wndproc     = WNDPROC(_proc)   # mantém referência viva
+            self._overlay_old_wndproc = ctypes.windll.user32.SetWindowLongW(
+                hwnd, GWLP_WNDPROC, self._overlay_wndproc,
+            )
+        except Exception:
+            pass
+
+    def _create_status_widget(self) -> None:
+        """Cria o indicador 'SAMP AUTO TRANSLATE ON/OFF'."""
+        font = ("Segoe UI", self._status_font_size, "bold")
+        frame = tk.Frame(self.root, bg="#111111", padx=8, pady=4)
+        self._status_dot = tk.Label(frame, text="●", bg="#111111", fg="#FF4444", font=font)
+        self._status_dot.pack(side="left")
+        self._status_title = tk.Label(
+            frame, text=" SAMP AUTO TRANSLATE  ", bg="#111111", fg="#FFFFFF", font=font,
+        )
+        self._status_title.pack(side="left")
+        self._status_state = tk.Label(frame, text="OFF", bg="#111111", fg="#FF4444", font=font)
+        self._status_state.pack(side="left")
+        self._status_frame = frame
+        # posicionamento inicial aplicado no primeiro _update_status_position()
+
+    def _create_notif_widget(self) -> None:
+        font = ("Segoe UI", self._notif_font_size, "bold")
+        frame = tk.Frame(self.root, bg="#111111", padx=8, pady=4)
+        self._notif_dot   = tk.Label(frame, text="●", bg="#111111", fg="#00FF00", font=font)
+        self._notif_title = tk.Label(frame, text="",  bg="#111111", fg="#FFFFFF", font=font)
+        self._notif_state = tk.Label(frame, text="",  bg="#111111", fg="#00FF00", font=font)
+        self._notif_dot.pack(side="left")
+        self._notif_title.pack(side="left")
+        self._notif_state.pack(side="left")
+        self._notif_frame    = frame
+        self._notif_hide_job: str | None = None
+
+    def show_notification(self, title: str, state_text: str, active: bool = True, duration_ms: int = 2500) -> None:
+        color = "#00FF00" if active else "#FF4444"
+        self._notif_dot.config(fg=color)
+        self._notif_title.config(text=f" {title}  ")
+        self._notif_state.config(text=state_text, fg=color)
+        if self._notif_hide_job is not None:
+            try:
+                self.root.after_cancel(self._notif_hide_job)
+            except Exception:
+                pass
+        self._notif_frame.place(x=0, y=10)  # posição real calculada em _update_notif_position
+        self._notif_hide_job = self.root.after(duration_ms, self._hide_notification)
+
+    def _hide_notification(self) -> None:
+        self._notif_frame.place_forget()
+        self._notif_hide_job = None
+
+    def get_notif_position(self, window_w: int) -> tuple[int, int]:
+        if self._notif_pos_x is None:
+            fw = self._notif_frame.winfo_reqwidth()
+            x  = window_w - fw - 10 if fw > 0 else window_w - 200
+        else:
+            x = self._notif_pos_x
+        return x, self._notif_pos_y
+
+    def set_notif_position(self, x: int, y: int) -> None:
+        self._notif_pos_x = x
+        self._notif_pos_y = y
+
+    def get_notif_font_size(self) -> int:
+        return self._notif_font_size
+
+    def set_notif_font_size(self, size: int) -> None:
+        self._notif_font_size = max(6, min(28, size))
+        font = ("Segoe UI", self._notif_font_size, "bold")
+        self._notif_dot.config(font=font)
+        self._notif_title.config(font=font)
+        self._notif_state.config(font=font)
+
+    def _update_notif_position(self, w: int) -> None:
+        if not self._notif_frame.winfo_ismapped():
+            return
+        if self._notif_pos_x is None:
+            fw = self._notif_frame.winfo_reqwidth()
+            sx = w - fw - 10 if fw > 0 else w - 200
+        else:
+            sx = self._notif_pos_x
+        self._notif_frame.place(x=sx, y=self._notif_pos_y)
+
+    def _update_status_position(self, w: int) -> None:
+        """Reposiciona o widget de status; chamado a cada ciclo de _update()."""
+        if not self._status_visible:
+            self._status_frame.place_forget()
+            return
+        if self._status_pos_x is None:
+            fw = self._status_frame.winfo_reqwidth()
+            sx = w - fw - 10 if fw > 0 else w - 220
+        else:
+            sx = self._status_pos_x
+        self._status_frame.place(x=sx, y=self._status_pos_y)
+
+    # ── Getters/setters do status overlay ─────────────────────────────────────
+
+    def get_status_position(self, window_w: int) -> tuple[int, int]:
+        if self._status_pos_x is None:
+            fw = self._status_frame.winfo_reqwidth()
+            x = window_w - fw - 10 if fw > 0 else window_w - 220
+        else:
+            x = self._status_pos_x
+        return x, self._status_pos_y
+
+    def set_status_position(self, x: int, y: int) -> None:
+        self._status_pos_x = x
+        self._status_pos_y = y
+
+    def get_status_font_size(self) -> int:
+        return self._status_font_size
+
+    def set_status_font_size(self, size: int) -> None:
+        self._status_font_size = max(6, min(28, size))
+        font = ("Segoe UI", self._status_font_size, "bold")
+        for w in self._status_frame.winfo_children():
+            w.config(font=font)
+        self._status_dot.config(font=font)
+        self._status_title.config(font=font)
+        self._status_state.config(font=font)
+        if self._status_pos_x is None:
+            self._status_frame.place_forget()  # força recálculo de posição
+
+    def get_status_visible(self) -> bool:
+        return self._status_visible
+
+    def set_status_visible(self, visible: bool) -> None:
+        self._status_visible = visible
+        if not visible:
+            self._status_frame.place_forget()
+
+    def set_translate_active(self, active: bool) -> None:
+        self._translate_active = active
+        color = "#00FF00" if active else "#FF4444"
+        text  = "ON"     if active else "OFF"
+        self._status_dot.config(fg=color)
+        self._status_state.config(text=text, fg=color)
 
     def add_message(self, text: str, color: str | None = None) -> None:
         self._messages.append((text, color))
@@ -264,6 +436,7 @@ class ChatOverlay:
                 font=self.FONT,
             )
 
+
     def _update(self):
         if not self._running:
             return
@@ -279,6 +452,8 @@ class ChatOverlay:
             self.root.geometry(f"{w}x{h}+{x}+{y}")
             self.canvas.config(width=w, height=h)
             self._redraw(w, h)
+            self._update_status_position(w)
+            self._update_notif_position(w)
             self.root.deiconify()
         else:
             self.root.withdraw()

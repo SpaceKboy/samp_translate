@@ -167,9 +167,9 @@ class SampChatReader:
     """Lê o chat do SA-MP 0.3.DL-R1 via memória do processo gta_sa.exe."""
 
     def __init__(self):
-        self._pm:            pymem.Pymem | None = None
-        self._array_base:    int = 0          # endereço absoluto do slot 0
-        self._last_snapshot: list[str] = [""] * _MAX_LINES
+        self._pm:           pymem.Pymem | None = None
+        self._array_base:   int = 0
+        self._prev_counter: dict[str, int] = {}  # key → count in last snapshot
 
     # ------------------------------------------------------------------
     # Conexão
@@ -190,6 +190,13 @@ class SampChatReader:
                 "Certifique-se de estar conectado a um servidor com mensagens no chat."
             )
         self._array_base = addr
+        # Seed counter with current buffer so first poll() sees no history.
+        counter: dict[str, int] = {}
+        for msg in self._snapshot():
+            if msg is not None:
+                key = f"{msg.msg_type}|{msg.text}"
+                counter[key] = counter.get(key, 0) + 1
+        self._prev_counter = counter
 
     def is_attached(self) -> bool:
         try:
@@ -231,20 +238,35 @@ class SampChatReader:
     # ------------------------------------------------------------------
 
     def poll(self) -> Iterator[ChatMessage]:
-        """Retorna apenas mensagens novas desde o último poll()."""
-        current      = self._snapshot()
-        new_messages : list[ChatMessage] = []
+        """Retorna apenas mensagens novas desde o último poll().
 
-        for i, msg in enumerate(current):
+        Compara contagens de conteúdo (não índices) para ser imune ao
+        deslocamento do ring buffer. Mensagens repetidas são detectadas
+        quando sua contagem no buffer aumenta.
+        """
+        current     = self._snapshot()
+        new_counter: dict[str, int] = {}
+        first_msg:   dict[str, ChatMessage] = {}
+        ordered:     list[str] = []
+
+        for msg in current:
             if msg is None:
-                self._last_snapshot[i] = ""
                 continue
             key = f"{msg.msg_type}|{msg.text}"
-            if key != self._last_snapshot[i]:
-                self._last_snapshot[i] = key
-                new_messages.append(msg)
+            if key not in new_counter:
+                new_counter[key] = 0
+                first_msg[key]   = msg
+                ordered.append(key)
+            new_counter[key] += 1
 
-        yield from new_messages
+        new_msgs: list[ChatMessage] = []
+        for key in ordered:
+            extra = new_counter[key] - self._prev_counter.get(key, 0)
+            if extra > 0:
+                new_msgs.extend([first_msg[key]] * extra)
+
+        self._prev_counter = new_counter
+        yield from new_msgs
 
     def run(
         self,
