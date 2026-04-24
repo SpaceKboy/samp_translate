@@ -1498,8 +1498,8 @@ class PresetsDialog:
         if name in self._config.preset_names:
             self._warn(f'A preset named "{name}" already exists.')
             return
-        self._config.save_current(name, self._panel, self._overlay)
-        self._config.set_active(name)
+        self._config.create(name)
+        self._config.apply(name, self._panel, self._overlay)
         self._config.save()
         self._refresh_list()
 
@@ -2094,15 +2094,33 @@ class ControlPanel:
                     pass
 
             key = self._shortcuts["chat_key"]
+            if not key:
+                self._kb_hook = None
+                return
+
+            # _inject_count tracks re-injected key events so they are not
+            # suppressed a second time. Increment before injecting, decrement
+            # when the injected event comes back through the hook.
+            _inject_count = [0]
 
             def _handler(event):
                 try:
+                    if _inject_count[0] > 0:
+                        _inject_count[0] -= 1
+                        return  # let this re-injected event reach other apps
                     if win32gui.GetForegroundWindow() == self._hwnd:
+                        # GTA is focused: suppress the key so SA-MP never opens
+                        # its native chat, then open our overlay instead.
                         self.root.after(0, self._show_send_input)
+                    elif len(key) == 1:
+                        # Another app is focused: re-inject so it still receives
+                        # the key (suppress=True would otherwise eat it globally).
+                        _inject_count[0] += 1
+                        win32api.keybd_event(ord(key.upper()), 0, 0, 0)
                 except Exception:
                     pass
 
-            self._kb_hook = keyboard.on_press_key(key, _handler, suppress=False)
+            self._kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
         except ImportError:
             pass
 
@@ -2121,6 +2139,9 @@ class ControlPanel:
                     pass
 
             key = self._shortcuts["toggle_key"]
+            if not key:
+                self._toggle_kb_hook = None
+                return
 
             def _handler(event):
                 try:
@@ -2291,6 +2312,10 @@ class ControlPanel:
     def _apply_startup_config(self) -> None:
         """Restore the active preset from the last session on startup."""
         self._config.apply(self._config.active_preset, self, None)
+        # The trace_add on 'enabled'/'user_enabled' fires during apply() before
+        # source/target are set, so _prewarm_translator gets _PLACEHOLDER values
+        # and does nothing. Explicitly call it now that all settings are loaded.
+        self._on_translation_toggle()
 
     def _open_presets_dialog(self) -> None:
         PresetsDialog(master=self.root, config=self._config, panel=self, overlay=self._overlay)

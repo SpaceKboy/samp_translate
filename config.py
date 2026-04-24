@@ -24,8 +24,8 @@ def _default_preset() -> dict:
     """Return a fresh preset dict populated with factory defaults."""
     return {
         "shortcuts": {
-            "chat_key":    "y",
-            "toggle_key":  "z",
+            "chat_key":    "",
+            "toggle_key":  "",
             "clear_key":   "",
             "filters_key": "",
         },

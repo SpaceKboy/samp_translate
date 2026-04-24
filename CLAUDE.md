@@ -75,6 +75,21 @@ Signature used to locate the array:
 - argostranslate translators are cached in `_argos_cache[(src, tgt)]` and pre-warmed in a background thread to avoid first-message latency.
 - Indirect translation (src→en→tgt) is attempted automatically when no direct package exists.
 
+#### Keyboard hooks
+
+- **`_setup_chat_hook()`** uses `suppress=True` (intercepts the key before it reaches SA-MP) with an `_inject_count` counter: when GTA is not in the foreground the key is re-injected via `win32api.keybd_event` so it still reaches other apps. Always guard against empty `chat_key` / `toggle_key` before calling `keyboard.on_press_key()` — an empty string raises an exception that silently breaks `config.apply()`.
+- **`_start_input_hook()`** (overlay chat input) tracks Shift/Ctrl/Alt state manually via `KEY_DOWN`/`KEY_UP` events instead of using `GetAsyncKeyState`. With `suppress=True` active, Windows never updates its async key-state table for consumed keys, so `GetAsyncKeyState(VK_SHIFT)` always returns 0.
+- **`_resolve_char()`** uses `ToUnicodeEx` with the keyboard layout handle of the GTA window thread (`GetKeyboardLayout(GetWindowThreadProcessId(hwnd))`) to correctly translate scan codes under any Windows input language. Do **not** call `ToUnicodeEx` for modifier key events — it corrupts the internal dead-key state and breaks subsequent character resolution.
+
+#### Translation startup
+
+- `_apply_startup_config()` calls `_on_translation_toggle()` explicitly **after** `config.apply()` returns. The `trace_add("write", …)` callback on `_translation["enabled"]` fires during `apply()` before `source`/`target` are set, so the prewarm inside the callback receives `_PLACEHOLDER` values and does nothing. The explicit post-apply call runs with all settings populated and actually warms the cache.
+
+#### Presets
+
+- New presets are always created with `_default_preset()` (blank factory defaults), never a snapshot of the current UI state. `PresetsDialog._new_preset()` calls `config.create()` then `config.apply()` — not `save_current()`.
+- Default preset ships with no shortcuts configured (`chat_key: ""`, `toggle_key: ""`) so the app starts without capturing any keys by default.
+
 ### Reverse engineering tools
 
 The `find_chat_offsets*.py` files (if present) are standalone RE tools used to discover the SA-MP memory layout. They are not part of the application and can be ignored or deleted.

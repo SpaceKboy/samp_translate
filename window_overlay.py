@@ -699,10 +699,42 @@ class ChatOverlay:
             def _refresh(text):
                 self._draw_input_canvas(text=text, cursor=getattr(self, "_cursor_visible", True))
 
+            _SHIFT_NAMES = frozenset({'shift', 'left shift', 'right shift'})
+            _CTRL_NAMES  = frozenset({'ctrl', 'left ctrl', 'right ctrl'})
+            _ALT_NAMES   = frozenset({'alt', 'left alt', 'right alt', 'altgr'})
+            _SKIP_KEYS   = frozenset({
+                'caps lock', 'num lock', 'scroll lock',
+                'windows', 'left windows', 'right windows', 'menu',
+                'up', 'down', 'left', 'right',
+                'delete', 'insert', 'home', 'end', 'page up', 'page down',
+                'print screen', 'pause', 'tab',
+                'f1', 'f2', 'f3', 'f4', 'f5', 'f6',
+                'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
+            })
+
+            # Track modifier state from events directly — more reliable than
+            # kb.is_pressed or GetAsyncKeyState inside a suppress=True hook.
+            _shift = [False]
+            _ctrl  = [False]
+            _alt   = [False]
+
             def _handler(event):
-                if event.event_type != kb.KEY_DOWN:
+                name    = event.name
+                is_down = (event.event_type == kb.KEY_DOWN)
+
+                if name in _SHIFT_NAMES:
+                    _shift[0] = is_down
                     return
-                name = event.name
+                if name in _CTRL_NAMES:
+                    _ctrl[0] = is_down
+                    return
+                if name in _ALT_NAMES:
+                    _alt[0] = is_down
+                    return
+
+                if not is_down:
+                    return
+
                 if name == 'enter':
                     self.root.after(0, on_submit)
                 elif name in ('escape', 'esc'):
@@ -713,8 +745,8 @@ class ChatOverlay:
                         self._input_var.set(t)
                         _refresh(t)
                     self.root.after(0, _back)
-                else:
-                    char = self._resolve_char(name)
+                elif name not in _SKIP_KEYS:
+                    char = self._resolve_char(event, _shift[0], _ctrl[0], _alt[0])
                     if char is not None:
                         def _append(c=char):
                             t = self._input_var.get() + c
@@ -726,28 +758,56 @@ class ChatOverlay:
         except ImportError:
             self._input_kb_hook = None
 
-    def _resolve_char(self, name: str) -> str | None:
+    def _resolve_char(self, event, shift: bool = False, ctrl: bool = False, alt: bool = False) -> str | None:
         """
-        Map a key name to the character it produces, respecting Shift and Caps Lock.
+        Map a keyboard event to the character it produces using the active Windows
+        keyboard layout of the GTA window thread.
 
-        Handles only printable ASCII characters on a US QWERTY layout.
-        Returns None for non-printable keys (arrows, function keys, etc.).
+        Modifier state must be passed in explicitly (tracked by the caller) rather
+        than queried here — inside a suppress=True hook neither GetAsyncKeyState nor
+        kb.is_pressed is reliable for suppressed modifier keys.
         """
+        name = event.name if hasattr(event, 'name') else str(event)
+        if name == 'space':
+            return ' '
+
         try:
-            import keyboard as kb
-            shift = kb.is_pressed('shift')
-            caps  = kb.is_pressed('caps lock')
-        except Exception:
-            shift = caps = False
+            import ctypes
+            user32 = ctypes.windll.user32
 
-        if len(name) == 1:
+            tid  = user32.GetWindowThreadProcessId(self._hwnd, None)
+            hkl  = user32.GetKeyboardLayout(tid)
+            scan = getattr(event, 'scan_code', 0)
+            vk   = user32.MapVirtualKeyExW(scan, 1, hkl)  # MAPVK_VSC_TO_VK
+            if not vk:
+                return None
+
+            kb_state = (ctypes.c_ubyte * 256)()
+            if shift:
+                kb_state[0x10] = 0x80
+            if ctrl:
+                kb_state[0x11] = 0x80
+            if alt:
+                kb_state[0x12] = 0x80
+            if user32.GetKeyState(0x14) & 0x0001:  # VK_CAPITAL (Caps Lock toggle)
+                kb_state[0x14] = 0x01
+
+            buf    = ctypes.create_unicode_buffer(5)
+            result = user32.ToUnicodeEx(vk, scan, kb_state, buf, 5, 0, hkl)
+
+            if result > 0 and buf.value and buf.value[0].isprintable():
+                return buf.value[0]
+            return None
+        except Exception:
+            pass
+
+        # Fallback: plain ASCII via SHIFT_MAP
+        if len(name) == 1 and name.isprintable():
             if name.isalpha():
-                return name.upper() if (shift ^ caps) else name
+                return name.upper() if shift else name
             if shift and name in self._SHIFT_MAP:
                 return self._SHIFT_MAP[name]
             return name
-        if name == 'space':
-            return ' '
         return None
 
     def _close_input(self) -> None:
