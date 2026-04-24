@@ -1958,7 +1958,7 @@ class ControlPanel:
                 except Exception:
                     pass
 
-            self._kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
+            self._kb_hook = keyboard.on_press_key(key, _handler, suppress=False)
         except ImportError:
             pass
 
@@ -1982,7 +1982,7 @@ class ControlPanel:
                 except Exception:
                     pass
 
-            self._toggle_kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
+            self._toggle_kb_hook = keyboard.on_press_key(key, _handler, suppress=False)
         except ImportError:
             pass
 
@@ -2009,7 +2009,7 @@ class ControlPanel:
                 except Exception:
                     pass
 
-            self._clear_kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
+            self._clear_kb_hook = keyboard.on_press_key(key, _handler, suppress=False)
         except ImportError:
             pass
 
@@ -2036,7 +2036,7 @@ class ControlPanel:
                 except Exception:
                     pass
 
-            self._filters_kb_hook = keyboard.on_press_key(key, _handler, suppress=True)
+            self._filters_kb_hook = keyboard.on_press_key(key, _handler, suppress=False)
         except ImportError:
             pass
 
