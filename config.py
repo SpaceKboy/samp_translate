@@ -18,8 +18,9 @@ def _default_preset() -> dict:
             "enabled": False, "source": _PLACEHOLDER, "target": _PLACEHOLDER,
             "user_enabled": False, "user_source": _PLACEHOLDER, "user_target": _PLACEHOLDER,
         },
-        "filters":        [],
-        "ignore_self":    {"enabled": False, "name": ""},
+        "filters":              [],
+        "ignore_self":          {"enabled": False, "name": ""},
+        "no_translate_commands": False,
         "chat_style":     {"font": "Arial", "size": 11, "color": "#FFFFFF", "max_messages": 12},
         "chat_position":  {"x": None, "y": None},
         "input_position": {"x": None, "y": None},
@@ -137,6 +138,8 @@ class ConfigManager:
             "name":    panel._ignore_self["name"],
         }
 
+        p["no_translate_commands"] = panel._no_translate_commands.get()
+
         if overlay is not None:
             family, size, color = overlay.get_style()
             p["chat_style"] = {
@@ -197,6 +200,8 @@ class ConfigManager:
         ig = preset.get("ignore_self", {})
         panel._ignore_self["var"].set(ig.get("enabled", False))
         panel._ignore_self["name"] = ig.get("name", "")
+
+        panel._no_translate_commands.set(preset.get("no_translate_commands", False))
 
         self.apply_overlay(preset, overlay)
         self._data["active_preset"] = name

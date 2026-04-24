@@ -445,11 +445,12 @@ class FiltersDialog:
     """Janela para ativar/desativar filtros e configurar 'Me ignorar'."""
 
     def __init__(self, master: tk.Misc, filters: list[dict], overlay: ChatOverlay | None,
-                 ignore_self: dict, on_filter_change):
-        self._filters          = filters
-        self._overlay          = overlay
-        self._ignore_self      = ignore_self
-        self._on_filter_change = on_filter_change
+                 ignore_self: dict, no_translate_commands: tk.BooleanVar, on_filter_change):
+        self._filters                 = filters
+        self._overlay                 = overlay
+        self._ignore_self             = ignore_self
+        self._no_translate_commands   = no_translate_commands
+        self._on_filter_change        = on_filter_change
 
         self.root = tk.Toplevel(master)
         self.root.title("Filtros")
@@ -494,6 +495,18 @@ class FiltersDialog:
             font=("Segoe UI", 8),
         )
         self._lbl_ignore_name.pack(side="right")
+
+        # ── Não traduzir comandos ──
+        cmd_frame = tk.Frame(self.root, bg=BG_PANEL, padx=10, pady=8)
+        cmd_frame.pack(fill="x", padx=14, pady=(0, 6))
+
+        tk.Checkbutton(
+            cmd_frame, text="Não traduzir comandos  (/comando)",
+            variable=self._no_translate_commands,
+            bg=BG_PANEL, fg=FG, selectcolor=BG,
+            activebackground=BG_PANEL, activeforeground=ACCENT,
+            font=FONT_UI, cursor="hand2",
+        ).pack(side="left")
 
         tk.Frame(self.root, bg=BG_PANEL, height=1).pack(fill="x", padx=14, pady=6)
 
@@ -1528,6 +1541,7 @@ class ControlPanel:
         # Filtros — cada entrada: name, keyword, type ("whitelist"|"blacklist"), var (BooleanVar)
         self._filters: list[dict] = []
         self._ignore_self: dict = {"var": tk.BooleanVar(value=False), "name": ""}
+        self._no_translate_commands = tk.BooleanVar(value=False)
         self._translation: dict = {
             "enabled":      tk.BooleanVar(value=False),
             "source":       tk.StringVar(value=LANG_PLACEHOLDER),
@@ -1723,6 +1737,8 @@ class ControlPanel:
     def _try_translate(self, msg):
         if not self._translation["enabled"].get():
             return msg
+        if self._no_translate_commands.get() and msg.text.lstrip().startswith("/"):
+            return msg
         src = ALL_LANGUAGES.get(self._translation["source"].get())
         tgt = ALL_LANGUAGES.get(self._translation["target"].get())
         if not src or not tgt or src == tgt:
@@ -1916,7 +1932,9 @@ class ControlPanel:
 
     def _open_filters_dialog(self) -> None:
         FiltersDialog(master=self.root, filters=self._filters, overlay=self._overlay,
-                      ignore_self=self._ignore_self, on_filter_change=self._clear_chat)
+                      ignore_self=self._ignore_self,
+                      no_translate_commands=self._no_translate_commands,
+                      on_filter_change=self._clear_chat)
 
     # ── Atalhos ───────────────────────────────────────────────────────────────
 
