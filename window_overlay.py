@@ -1,13 +1,34 @@
+"""
+Window selection dialog and transparent chat overlay for SAMP Translate.
+
+Key design decisions:
+  - ChatOverlay uses Toplevel(master) so the Tk mainloop stays in ControlPanel.
+  - The overlay window uses -transparentcolor black: pure black pixels become
+    transparent, letting the game render beneath them.
+  - Click-through is achieved by subclassing the Win32 window procedure and
+    returning HTTRANSPARENT for WM_NCHITTEST, making all mouse events fall
+    through to the window behind.
+  - stop() calls destroy() (not quit()) to avoid killing the shared mainloop.
+"""
+
 import os
 import sys
 
-def _fix_tcl_paths():
+
+def _fix_tcl_paths() -> None:
+    """
+    Ensure TCL_LIBRARY and TK_LIBRARY point to the base Python installation.
+
+    When running from a venv the Tcl/Tk DLLs live in the base interpreter's
+    directory, not in the venv; without this fix tkinter raises an import error.
+    """
     base = getattr(sys, "base_prefix", sys.prefix)
     tcl = os.path.join(base, "tcl", "tcl8.6")
     tk_ = os.path.join(base, "tcl", "tk8.6")
     if os.path.isdir(tcl):
         os.environ.setdefault("TCL_LIBRARY", tcl)
         os.environ.setdefault("TK_LIBRARY", tk_)
+
 
 _fix_tcl_paths()
 
@@ -19,34 +40,49 @@ import win32process
 import win32api
 import win32con
 
+# How often the overlay refreshes its position to follow the game window
 UPDATE_INTERVAL_MS = 100
 
 
 def _draw_rounded_rect(canvas, x1, y1, x2, y2, r, fill="#111111", outline="white", lw=1):
-    """Desenha retângulo com cantos arredondados no canvas."""
-    # preenchimento: dois retângulos + quatro arcos de canto
-    canvas.create_rectangle(x1+r, y1,   x2-r, y2,   fill=fill, outline="")
-    canvas.create_rectangle(x1,   y1+r, x2,   y2-r, fill=fill, outline="")
+    """
+    Draw a rounded rectangle on a tk.Canvas.
+
+    Implemented as two overlapping rectangles (horizontal + vertical strips)
+    plus four arc corners, then an outline drawn the same way.
+    """
+    # Filled body
+    canvas.create_rectangle(x1 + r, y1,     x2 - r, y2,     fill=fill, outline="")
+    canvas.create_rectangle(x1,     y1 + r, x2,     y2 - r, fill=fill, outline="")
     for ax, ay, start in [
-        (x1,     y1,     90), (x2-2*r, y1,     0),
-        (x1,     y2-2*r, 180),(x2-2*r, y2-2*r, 270),
+        (x1,         y1,         90),
+        (x2 - 2 * r, y1,          0),
+        (x1,         y2 - 2 * r, 180),
+        (x2 - 2 * r, y2 - 2 * r, 270),
     ]:
-        canvas.create_arc(ax, ay, ax+2*r, ay+2*r, start=start, extent=90, fill=fill, outline="")
-    # contorno
-    canvas.create_line(x1+r, y1, x2-r, y1, fill=outline, width=lw)
-    canvas.create_line(x1+r, y2, x2-r, y2, fill=outline, width=lw)
-    canvas.create_line(x1, y1+r, x1, y2-r, fill=outline, width=lw)
-    canvas.create_line(x2, y1+r, x2, y2-r, fill=outline, width=lw)
+        canvas.create_arc(ax, ay, ax + 2 * r, ay + 2 * r,
+                          start=start, extent=90, fill=fill, outline="")
+    # Outline
+    canvas.create_line(x1 + r, y1, x2 - r, y1, fill=outline, width=lw)
+    canvas.create_line(x1 + r, y2, x2 - r, y2, fill=outline, width=lw)
+    canvas.create_line(x1, y1 + r, x1, y2 - r, fill=outline, width=lw)
+    canvas.create_line(x2, y1 + r, x2, y2 - r, fill=outline, width=lw)
     for ax, ay, start in [
-        (x1,     y1,     90), (x2-2*r, y1,     0),
-        (x1,     y2-2*r, 180),(x2-2*r, y2-2*r, 270),
+        (x1,         y1,         90),
+        (x2 - 2 * r, y1,          0),
+        (x1,         y2 - 2 * r, 180),
+        (x2 - 2 * r, y2 - 2 * r, 270),
     ]:
-        canvas.create_arc(ax, ay, ax+2*r, ay+2*r,
+        canvas.create_arc(ax, ay, ax + 2 * r, ay + 2 * r,
                           start=start, extent=90, style="arc", outline=outline, width=lw)
 
 
 def list_visible_windows() -> list[tuple[int, str, str]]:
-    """Retorna lista de (hwnd, titulo, nome_do_processo) de janelas visíveis."""
+    """
+    Return a list of (hwnd, title, process_name) for all visible, titled windows.
+
+    Results are sorted alphabetically by process name to make GTA easy to find.
+    """
     windows = []
 
     def _enum(hwnd, _):
@@ -74,7 +110,7 @@ def list_visible_windows() -> list[tuple[int, str, str]]:
 
 
 def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
-    """Retorna (x, y, largura, altura) ou None."""
+    """Return (x, y, width, height) for the given window, or None on error."""
     try:
         left, top, right, bottom = win32gui.GetWindowRect(hwnd)
         return left, top, right - left, bottom - top
@@ -83,7 +119,13 @@ def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
 
 
 class SelectorDialog:
-    """Diálogo para o usuário escolher a janela alvo."""
+    """
+    Modal dialog that lets the user pick a target window from a list.
+
+    When called with master= it opens as a Toplevel and blocks via grab_set +
+    wait_window. Without master it creates its own Tk root and enters mainloop.
+    The chosen HWND is stored in self.selected_hwnd (None if cancelled).
+    """
 
     def __init__(self, master: tk.Misc | None = None):
         self.selected_hwnd: int | None = None
@@ -94,7 +136,7 @@ class SelectorDialog:
         else:
             self.root = tk.Tk()
 
-        self.root.title("Selecionar janela")
+        self.root.title("Select Window")
         self.root.resizable(True, True)
         self.root.minsize(520, 360)
         self._build_ui()
@@ -109,20 +151,20 @@ class SelectorDialog:
         top = tk.Frame(self.root, padx=8, pady=6)
         top.pack(fill="x")
 
-        tk.Label(top, text="Filtrar:").pack(side="left")
+        tk.Label(top, text="Filter:").pack(side="left")
         self._filter_var = tk.StringVar()
         self._filter_var.trace_add("write", lambda *_: self._refresh_list())
         tk.Entry(top, textvariable=self._filter_var, width=30).pack(side="left", padx=4)
 
-        tk.Button(top, text="Atualizar", command=self._refresh_list).pack(side="right")
+        tk.Button(top, text="Refresh", command=self._refresh_list).pack(side="right")
 
         cols = ("proc", "title", "hwnd")
         frame = tk.Frame(self.root)
         frame.pack(fill="both", expand=True, padx=8)
 
         self._tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
-        self._tree.heading("proc",  text="Processo")
-        self._tree.heading("title", text="Título da janela")
+        self._tree.heading("proc",  text="Process")
+        self._tree.heading("title", text="Window Title")
         self._tree.heading("hwnd",  text="HWND")
         self._tree.column("proc",  width=140, anchor="w")
         self._tree.column("title", width=280, anchor="w")
@@ -137,8 +179,8 @@ class SelectorDialog:
 
         btn_frame = tk.Frame(self.root, pady=6)
         btn_frame.pack()
-        tk.Button(btn_frame, text="OK", width=12, command=self._confirm).pack(side="left", padx=6)
-        tk.Button(btn_frame, text="Cancelar", width=12, command=self.root.destroy).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="OK",     width=12, command=self._confirm).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="Cancel", width=12, command=self.root.destroy).pack(side="left", padx=6)
 
         self._all_windows: list[tuple[int, str, str]] = []
         self._refresh_list()
@@ -157,41 +199,60 @@ class SelectorDialog:
     def _confirm(self):
         sel = self._tree.selection()
         if not sel:
-            messagebox.showwarning("Aviso", "Selecione uma janela primeiro.")
+            messagebox.showwarning("Warning", "Please select a window first.")
             return
         self.selected_hwnd = int(sel[0])
         self.root.destroy()
 
 
 class ChatOverlay:
-    """Overlay transparente sobre o GTA que exibe o chat traduzido abaixo do chat SA-MP."""
+    """
+    Transparent, always-on-top overlay that renders translated chat text over GTA.
+
+    The overlay window is sized and positioned to exactly match the game window
+    every UPDATE_INTERVAL_MS milliseconds. Pure black pixels are transparent
+    (via -transparentcolor black), and WM_NCHITTEST returns HTTRANSPARENT so all
+    mouse and keyboard input passes through to the game unimpeded.
+    """
 
     MAX_MESSAGES = 9
-    # SA-MP chat nativo ocupa aprox. 50-72% da altura — começamos logo abaixo
-    CHAT_Y_RATIO = 0.73
-    CHAT_X_OFFSET = 8
-    LINE_HEIGHT = 19
-    FONT = ("Arial", 10, "bold")
-    TEXT_COLOR = "#FFFFFF"
-    # Sombra quase preta (não puro preto, pois preto = transparente com -transparentcolor)
-    SHADOW_COLOR = "#111111"
+    # SA-MP's native chat occupies roughly 50–72 % of the window height;
+    # we place translated text just below that band.
+    CHAT_Y_RATIO  = 0.73
+    CHAT_X_OFFSET = 8     # pixels from the left edge
+    LINE_HEIGHT   = 19    # vertical spacing between chat lines
+    FONT          = ("Arial", 10, "bold")
+    TEXT_COLOR    = "#FFFFFF"
+    # Shadow is near-black, not pure black — pure black is the transparent key colour
+    SHADOW_COLOR  = "#111111"
 
     def __init__(self, hwnd: int, master: tk.Misc | None = None):
-        self._hwnd = hwnd
+        self._hwnd   = hwnd
         self._running = True
         self._messages: list[tuple[str, str | None]] = []
+
+        # Default chat position (pixels from top-left of game window)
         self._pos_x: int | None = 48
         self._pos_y: int | None = 330
+
+        # Default text-input field position
         self._input_pos_x: int | None = 48
         self._input_pos_y: int | None = 267
+
+        # Translation toggle state (reflected in the status indicator)
         self._translate_active: bool = True
+
+        # Status indicator ("SAMP AUTO TRANSLATE ON/OFF") settings
         self._status_visible:   bool = True
         self._status_font_size: int  = 9
-        self._status_pos_x: int | None = 1395
-        self._status_pos_y: int        = 855
+        self._status_pos_x: int | None = 1395  # None = auto-right
+        self._status_pos_y: int         = 855
+
+        # Notification banner settings
         self._notif_font_size: int     = 9
-        self._notif_pos_x: int | None  = None   # None = auto topo-direita
-        self._notif_pos_y: int         = 10
+        self._notif_pos_x:     int | None = None  # None = auto top-right
+        self._notif_pos_y:     int        = 10
+
         self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self._configure_window()
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
@@ -201,6 +262,7 @@ class ChatOverlay:
         self._update()
 
     def _configure_window(self):
+        """Set up the transparent, borderless, always-on-top overlay window."""
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-transparentcolor", "black")
@@ -210,7 +272,12 @@ class ChatOverlay:
         self.root.after(0, self._set_click_through)
 
     def _set_click_through(self) -> None:
-        """Intercepta WM_NCHITTEST para HTTRANSPARENT — overlay visível mas 100% click-through."""
+        """
+        Subclass the Win32 window procedure to return HTTRANSPARENT on WM_NCHITTEST.
+
+        This makes the overlay 100 % click-through: the user can interact with the
+        game normally even when the chat text is rendered on top of it.
+        """
         try:
             import ctypes
             from ctypes import wintypes
@@ -232,7 +299,8 @@ class ChatOverlay:
                     self._overlay_old_wndproc, h, msg, wp, lp,
                 )
 
-            self._overlay_wndproc     = WNDPROC(_proc)   # mantém referência viva
+            # Keep a reference to the callback so it is not garbage-collected
+            self._overlay_wndproc     = WNDPROC(_proc)
             self._overlay_old_wndproc = ctypes.windll.user32.SetWindowLongW(
                 hwnd, GWLP_WNDPROC, self._overlay_wndproc,
             )
@@ -240,22 +308,27 @@ class ChatOverlay:
             pass
 
     def _create_status_widget(self) -> None:
-        """Cria o indicador 'SAMP AUTO TRANSLATE ON/OFF'."""
-        font = ("Segoe UI", self._status_font_size, "bold")
+        """Build the 'SAMP AUTO TRANSLATE ON/OFF' indicator widget."""
+        font  = ("Segoe UI", self._status_font_size, "bold")
         frame = tk.Frame(self.root, bg="#111111", padx=8, pady=4)
-        self._status_dot = tk.Label(frame, text="●", bg="#111111", fg="#FF4444", font=font)
+        self._status_dot = tk.Label(
+            frame, text="●", bg="#111111", fg="#FF4444", font=font,
+        )
         self._status_dot.pack(side="left")
         self._status_title = tk.Label(
             frame, text=" SAMP AUTO TRANSLATE  ", bg="#111111", fg="#FFFFFF", font=font,
         )
         self._status_title.pack(side="left")
-        self._status_state = tk.Label(frame, text="OFF", bg="#111111", fg="#FF4444", font=font)
+        self._status_state = tk.Label(
+            frame, text="OFF", bg="#111111", fg="#FF4444", font=font,
+        )
         self._status_state.pack(side="left")
         self._status_frame = frame
-        # posicionamento inicial aplicado no primeiro _update_status_position()
+        # Position is applied on the first _update_status_position() call
 
     def _create_notif_widget(self) -> None:
-        font = ("Segoe UI", self._notif_font_size, "bold")
+        """Build the temporary notification banner (hidden by default)."""
+        font  = ("Segoe UI", self._notif_font_size, "bold")
         frame = tk.Frame(self.root, bg="#111111", padx=8, pady=4)
         self._notif_dot   = tk.Label(frame, text="●", bg="#111111", fg="#00FF00", font=font)
         self._notif_title = tk.Label(frame, text="",  bg="#111111", fg="#FFFFFF", font=font)
@@ -266,7 +339,14 @@ class ChatOverlay:
         self._notif_frame    = frame
         self._notif_hide_job: str | None = None
 
-    def show_notification(self, title: str, state_text: str, active: bool = True, duration_ms: int = 2500) -> None:
+    def show_notification(
+        self, title: str, state_text: str, active: bool = True, duration_ms: int = 2500
+    ) -> None:
+        """
+        Flash a temporary banner (e.g. "FILTERS ON") and hide it after duration_ms.
+
+        active=True uses green; active=False uses red.
+        """
         color = "#00FF00" if active else "#FF4444"
         self._notif_dot.config(fg=color)
         self._notif_title.config(text=f" {title}  ")
@@ -276,7 +356,8 @@ class ChatOverlay:
                 self.root.after_cancel(self._notif_hide_job)
             except Exception:
                 pass
-        self._notif_frame.place(x=0, y=10)  # posição real calculada em _update_notif_position
+        # Initial placement; final x is calculated in _update_notif_position()
+        self._notif_frame.place(x=0, y=10)
         self._notif_hide_job = self.root.after(duration_ms, self._hide_notification)
 
     def _hide_notification(self) -> None:
@@ -306,6 +387,7 @@ class ChatOverlay:
         self._notif_state.config(font=font)
 
     def _update_notif_position(self, w: int) -> None:
+        """Reposition the notification banner. Called every update cycle."""
         if not self._notif_frame.winfo_ismapped():
             return
         if self._notif_pos_x is None:
@@ -316,7 +398,7 @@ class ChatOverlay:
         self._notif_frame.place(x=sx, y=self._notif_pos_y)
 
     def _update_status_position(self, w: int) -> None:
-        """Reposiciona o widget de status; chamado a cada ciclo de _update()."""
+        """Reposition the status indicator. Called every update cycle."""
         if not self._status_visible:
             self._status_frame.place_forget()
             return
@@ -327,12 +409,12 @@ class ChatOverlay:
             sx = self._status_pos_x
         self._status_frame.place(x=sx, y=self._status_pos_y)
 
-    # ── Getters/setters do status overlay ─────────────────────────────────────
+    # ── Status overlay getters / setters ──────────────────────────────────────
 
     def get_status_position(self, window_w: int) -> tuple[int, int]:
         if self._status_pos_x is None:
             fw = self._status_frame.winfo_reqwidth()
-            x = window_w - fw - 10 if fw > 0 else window_w - 220
+            x  = window_w - fw - 10 if fw > 0 else window_w - 220
         else:
             x = self._status_pos_x
         return x, self._status_pos_y
@@ -353,7 +435,8 @@ class ChatOverlay:
         self._status_title.config(font=font)
         self._status_state.config(font=font)
         if self._status_pos_x is None:
-            self._status_frame.place_forget()  # força recálculo de posição
+            # Force position recalculation after font size changes widget width
+            self._status_frame.place_forget()
 
     def get_status_visible(self) -> bool:
         return self._status_visible
@@ -364,28 +447,31 @@ class ChatOverlay:
             self._status_frame.place_forget()
 
     def set_translate_active(self, active: bool) -> None:
+        """Update the status indicator dot and text to reflect the active/inactive state."""
         self._translate_active = active
         color = "#00FF00" if active else "#FF4444"
-        text  = "ON"     if active else "OFF"
+        text  = "ON"      if active else "OFF"
         self._status_dot.config(fg=color)
         self._status_state.config(text=text, fg=color)
 
+    # ── Chat message management ────────────────────────────────────────────────
+
     def add_message(self, text: str, color: str | None = None) -> None:
+        """Append a message and evict the oldest if over MAX_MESSAGES."""
         self._messages.append((text, color))
         if len(self._messages) > self.MAX_MESSAGES:
             self._messages.pop(0)
 
     def clear_messages(self) -> None:
+        """Remove all displayed messages."""
         self._messages.clear()
 
     def set_style(self, font_family: str, font_size: int, color: str) -> None:
-        self.FONT = (font_family, font_size, "bold")
+        self.FONT       = (font_family, font_size, "bold")
         self.TEXT_COLOR = color
 
     def get_style(self) -> tuple[str, int, str]:
-        family = self.FONT[0]
-        size   = self.FONT[1]
-        return family, size, self.TEXT_COLOR
+        return self.FONT[0], self.FONT[1], self.TEXT_COLOR
 
     def get_max_messages(self) -> int:
         return self.MAX_MESSAGES
@@ -414,7 +500,10 @@ class ChatOverlay:
         self._input_pos_x = x
         self._input_pos_y = y
 
+    # ── Rendering ─────────────────────────────────────────────────────────────
+
     def _redraw(self, w: int, h: int):
+        """Repaint all chat lines onto the canvas with a 1-px drop shadow."""
         self.canvas.delete("all")
         chat_x, chat_y = self.get_position(h)
 
@@ -423,12 +512,14 @@ class ChatOverlay:
             if y + self.LINE_HEIGHT > h:
                 break
             text_color = msg_color if msg_color else self.TEXT_COLOR
+            # Shadow (offset by 1 px)
             self.canvas.create_text(
                 chat_x + 1, y + 1,
                 text=msg, anchor="nw",
                 fill=self.SHADOW_COLOR,
                 font=self.FONT,
             )
+            # Main text
             self.canvas.create_text(
                 chat_x, y,
                 text=msg, anchor="nw",
@@ -436,8 +527,13 @@ class ChatOverlay:
                 font=self.FONT,
             )
 
-
     def _update(self):
+        """
+        Main update loop — runs every UPDATE_INTERVAL_MS via tkinter's after().
+
+        Repositions the overlay to match the game window and triggers a redraw.
+        Hides the overlay if the game window is invalid or minimized.
+        """
         if not self._running:
             return
 
@@ -460,18 +556,22 @@ class ChatOverlay:
 
         self.root.after(UPDATE_INTERVAL_MS, self._update)
 
-    # Mapeamento shift+tecla para US QWERTY
+    # ── Text input field ──────────────────────────────────────────────────────
+
+    # Shift-key character map for a US QWERTY layout
     _SHIFT_MAP = {
-        '1':'!','2':'@','3':'#','4':'$','5':'%','6':'^','7':'&','8':'*','9':'(','0':')',
-        '`':'~','-':'_','=':'+','[':'{',']':'}','\\':'|',';':':','\'':'"',',':'<','.':'>','/':'?',
+        '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+        '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+        '`': '~', '-': '_', '=': '+', '[': '{', ']': '}',
+        '\\': '|', ';': ':', '\'': '"', ',': '<', '.': '>', '/': '?',
     }
 
-    # ── dimensões do input ────────────────────────────────────────────────────
-    _INPUT_W  = 340
-    _INPUT_H  = 28
-    _INPUT_R  = 14   # = H//2 → forma de pílula
-    _INPUT_PAD_LEFT  = 14   # margem esquerda interna
-    _INPUT_TEXT_X    = 22   # texto começa após o cursor
+    # Pill-shaped input box dimensions
+    _INPUT_W        = 340
+    _INPUT_H        = 28
+    _INPUT_R        = 14   # radius = H // 2 → pill shape
+    _INPUT_PAD_LEFT = 14   # internal left padding
+    _INPUT_TEXT_X   = 22   # text starts after the cursor line
 
     def _input_position(self) -> tuple[int, int]:
         if self._input_pos_x is not None and self._input_pos_y is not None:
@@ -481,12 +581,16 @@ class ChatOverlay:
         return x, y
 
     def _make_input_canvas(self, x: int, y: int) -> tk.Canvas:
-        c = tk.Canvas(self.root, width=self._INPUT_W, height=self._INPUT_H,
-                      bg="black", highlightthickness=0, bd=0)
+        c = tk.Canvas(
+            self.root,
+            width=self._INPUT_W, height=self._INPUT_H,
+            bg="black", highlightthickness=0, bd=0,
+        )
         c.place(x=x, y=y)
         return c
 
     def _draw_input_canvas(self, text: str = "", cursor: bool = False) -> None:
+        """Repaint the input pill: background, optional cursor line, and typed text."""
         c = self._input_frame
         if c is None:
             return
@@ -497,12 +601,12 @@ class ChatOverlay:
             return
         W, H, R = self._INPUT_W, self._INPUT_H, self._INPUT_R
         c.delete("all")
-        _draw_rounded_rect(c, 0, 0, W-1, H-1, R, fill="#111111", outline="white", lw=1)
+        _draw_rounded_rect(c, 0, 0, W - 1, H - 1, R, fill="#111111", outline="white", lw=1)
         if cursor:
             px = self._INPUT_PAD_LEFT
-            c.create_line(px, 5, px, H-5, fill="white", width=2)
+            c.create_line(px, 5, px, H - 5, fill="white", width=2)
         if text:
-            c.create_text(self._INPUT_TEXT_X, H//2, text=text,
+            c.create_text(self._INPUT_TEXT_X, H // 2, text=text,
                           anchor="w", fill="white", font=("Arial", 10))
 
     def _blink_input_cursor(self) -> None:
@@ -521,7 +625,12 @@ class ChatOverlay:
         self._cursor_job = self.root.after(530, self._blink_input_cursor)
 
     def show_input_preview(self) -> None:
-        """Mostra o campo de texto visualmente (sem hook) para orientar o usuário."""
+        """
+        Show the text-input pill without activating the keyboard hook.
+
+        Used by ChatInputPositionDialog so the user can drag the field to
+        their preferred position before it goes live.
+        """
         if getattr(self, "_input_frame", None) is not None:
             try:
                 if self._input_frame.winfo_exists():
@@ -529,12 +638,12 @@ class ChatOverlay:
             except Exception:
                 pass
         x, y = self._input_position()
-        self._input_frame = self._make_input_canvas(x, y)
-        self._input_kb_hook = None
-        self._draw_input_canvas(text="Chat de texto", cursor=False)
+        self._input_frame    = self._make_input_canvas(x, y)
+        self._input_kb_hook  = None
+        self._draw_input_canvas(text="Text Chat", cursor=False)
 
     def move_input_preview(self, x: int, y: int) -> None:
-        """Reposiciona o preview do campo de texto em tempo real."""
+        """Move the preview pill in real time while the position dialog is open."""
         if getattr(self, "_input_frame", None) is not None:
             try:
                 if self._input_frame.winfo_exists():
@@ -543,7 +652,12 @@ class ChatOverlay:
                 pass
 
     def show_input(self, on_submit, on_cancel=None) -> None:
-        """Exibe caixinha de texto sobre o overlay sem roubar o foco do GTA."""
+        """
+        Display the interactive text-input field over the overlay.
+
+        A global keyboard hook captures all key events without stealing focus
+        from GTA. Pressing Enter calls on_submit(text); Escape calls on_cancel().
+        """
         if getattr(self, "_input_frame", None) is not None:
             try:
                 if self._input_frame.winfo_exists():
@@ -552,8 +666,8 @@ class ChatOverlay:
                 pass
 
         x, y = self._input_position()
-        self._input_frame = self._make_input_canvas(x, y)
-        self._input_var    = tk.StringVar()
+        self._input_frame    = self._make_input_canvas(x, y)
+        self._input_var      = tk.StringVar()
         self._cursor_visible = True
         self._cursor_job     = None
         self._draw_input_canvas(text="", cursor=True)
@@ -573,7 +687,12 @@ class ChatOverlay:
         self._start_input_hook(_submit, _cancel)
 
     def _start_input_hook(self, on_submit, on_cancel) -> None:
-        """Hook global que captura todo o teclado enquanto o input está aberto."""
+        """
+        Install a global keyboard hook that routes all key events to the input field.
+
+        The hook uses suppress=True so keypresses do not also reach the game while
+        the input field is open.
+        """
         try:
             import keyboard as kb
 
@@ -608,7 +727,12 @@ class ChatOverlay:
             self._input_kb_hook = None
 
     def _resolve_char(self, name: str) -> str | None:
-        """Converte nome de tecla em caractere, respeitando shift e caps lock."""
+        """
+        Map a key name to the character it produces, respecting Shift and Caps Lock.
+
+        Handles only printable ASCII characters on a US QWERTY layout.
+        Returns None for non-printable keys (arrows, function keys, etc.).
+        """
         try:
             import keyboard as kb
             shift = kb.is_pressed('shift')
@@ -627,6 +751,7 @@ class ChatOverlay:
         return None
 
     def _close_input(self) -> None:
+        """Stop the cursor blink job, unhook the keyboard, and destroy the input pill."""
         if getattr(self, "_cursor_job", None) is not None:
             try:
                 self.root.after_cancel(self._cursor_job)
@@ -648,6 +773,7 @@ class ChatOverlay:
             self._input_frame = None
 
     def stop(self):
+        """Cleanly shut down the overlay (close input, stop update loop, destroy window)."""
         self._close_input()
         self._running = False
         self.root.destroy()
@@ -658,8 +784,8 @@ if __name__ == "__main__":
     hwnd = dialog.selected_hwnd
 
     if hwnd is None:
-        print("Nenhuma janela selecionada. Encerrando.")
+        print("No window selected. Exiting.")
     else:
-        print(f"Monitorando HWND={hwnd} — '{win32gui.GetWindowText(hwnd)}'")
+        print(f"Monitoring HWND={hwnd} — '{win32gui.GetWindowText(hwnd)}'")
         overlay = ChatOverlay(hwnd)
         overlay.root.mainloop()

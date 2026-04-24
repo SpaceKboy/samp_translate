@@ -1,42 +1,84 @@
-"""Gerenciamento de presets de configuração — %APPDATA%/SAMP-Translate/config.json."""
+"""
+Configuration preset manager for SAMP Translate.
+
+Presets are persisted as JSON at:
+    %APPDATA%/SAMP-Translate/config.json
+
+Each preset is a self-contained snapshot of all user settings (shortcuts,
+translation pair, filters, chat style, overlay positions). The active preset
+is restored automatically on the next launch.
+"""
 
 import json
 import os
 from pathlib import Path
 
-_APPDATA       = Path(os.environ.get("APPDATA", "."))
-CONFIG_DIR     = _APPDATA / "SAMP-Translate"
-CONFIG_FILE    = CONFIG_DIR / "config.json"
-DEFAULT_NAME   = "Padrão"
-_PLACEHOLDER   = "─ Selecionar ─"
+_APPDATA:      Path = Path(os.environ.get("APPDATA", "."))
+CONFIG_DIR:    Path = _APPDATA / "SAMP-Translate"
+CONFIG_FILE:   Path = CONFIG_DIR / "config.json"
+DEFAULT_NAME:  str  = "Default"
+_PLACEHOLDER:  str  = "─ Select ─"  # sentinel used when no language is chosen
 
 
 def _default_preset() -> dict:
+    """Return a fresh preset dict populated with factory defaults."""
     return {
-        "shortcuts":      {"chat_key": "y", "toggle_key": "z", "clear_key": "", "filters_key": ""},
-        "translation":    {
-            "enabled": False, "source": _PLACEHOLDER, "target": _PLACEHOLDER,
-            "user_enabled": False, "user_source": _PLACEHOLDER, "user_target": _PLACEHOLDER,
+        "shortcuts": {
+            "chat_key":    "y",
+            "toggle_key":  "z",
+            "clear_key":   "",
+            "filters_key": "",
         },
-        "filters":              [],
-        "ignore_self":          {"enabled": False, "name": ""},
+        "translation": {
+            "enabled":      False,
+            "source":       _PLACEHOLDER,
+            "target":       _PLACEHOLDER,
+            "user_enabled": False,
+            "user_source":  _PLACEHOLDER,
+            "user_target":  _PLACEHOLDER,
+        },
+        "filters":               [],
+        "ignore_self":           {"enabled": False, "name": ""},
         "no_translate_commands": False,
-        "chat_style":     {"font": "Arial", "size": 11, "color": "#FFFFFF", "max_messages": 12},
+        "chat_style": {
+            "font":         "Arial",
+            "size":         11,
+            "color":        "#FFFFFF",
+            "max_messages": 12,
+        },
         "chat_position":  {"x": None, "y": None},
         "input_position": {"x": None, "y": None},
-        "status":         {"visible": True, "x": None, "y": None, "font_size": 10},
+        "status": {
+            "visible":   True,
+            "x":         None,
+            "y":         None,
+            "font_size": 10,
+        },
     }
 
 
 class ConfigManager:
+    """
+    Load, save, and apply named configuration presets.
+
+    The internal data structure:
+        {
+            "active_preset": "Default",
+            "presets": {
+                "Default": { ...preset dict... },
+                ...
+            }
+        }
+    """
 
     def __init__(self) -> None:
         self._data: dict = {}
         self.load()
 
-    # ── Persistência ──────────────────────────────────────────────────────────
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def load(self) -> None:
+        """Load config from disk; fall back to a single default preset on any error."""
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 self._data = json.load(f)
@@ -47,38 +89,46 @@ class ConfigManager:
             }
 
     def save(self) -> None:
+        """Persist the current in-memory state to disk (creates the directory if needed)."""
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(self._data, f, ensure_ascii=False, indent=2)
 
-    # ── Acesso ────────────────────────────────────────────────────────────────
+    # ── Accessors ─────────────────────────────────────────────────────────────
 
     @property
     def preset_names(self) -> list[str]:
+        """Ordered list of all saved preset names."""
         return list(self._data.get("presets", {}).keys())
 
     @property
     def active_preset(self) -> str:
+        """Name of the currently active preset."""
         return self._data.get("active_preset", DEFAULT_NAME)
 
     def get_preset(self, name: str) -> dict | None:
+        """Return the preset dict for the given name, or None if it does not exist."""
         return self._data.get("presets", {}).get(name)
 
     def set_active(self, name: str) -> None:
+        """Mark a preset as active (does not save to disk)."""
         self._data["active_preset"] = name
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
 
     def create(self, name: str) -> None:
+        """Create a new preset with default values if it does not already exist."""
         self._data.setdefault("presets", {}).setdefault(name, _default_preset())
 
     def delete(self, name: str) -> None:
+        """Delete a preset, falling back to the first remaining preset if it was active."""
         self._data.get("presets", {}).pop(name, None)
         if self.active_preset == name:
             names = self.preset_names
             self._data["active_preset"] = names[0] if names else DEFAULT_NAME
 
     def rename(self, old: str, new: str) -> None:
+        """Rename a preset; updates the active pointer if the renamed preset was active."""
         presets = self._data.get("presets", {})
         if old in presets and new not in presets:
             presets[new] = presets.pop(old)
@@ -88,6 +138,7 @@ class ConfigManager:
     # ── Export / Import ───────────────────────────────────────────────────────
 
     def export_preset(self, name: str, path: str) -> None:
+        """Serialize a preset to a standalone JSON file."""
         preset = self.get_preset(name)
         if preset is None:
             raise KeyError(name)
@@ -95,6 +146,13 @@ class ConfigManager:
             json.dump({"preset_name": name, **preset}, f, ensure_ascii=False, indent=2)
 
     def import_preset(self, path: str) -> str:
+        """
+        Load a preset from a JSON file exported by export_preset().
+
+        If a preset with the same name already exists, a numeric suffix is
+        appended (e.g. "MyPreset (2)") to avoid overwriting it.
+        Returns the final name the preset was stored under.
+        """
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         name = data.pop("preset_name", Path(path).stem)
@@ -105,9 +163,15 @@ class ConfigManager:
         self._data.setdefault("presets", {})[name] = data
         return name
 
-    # ── Coletar estado atual → preset ─────────────────────────────────────────
+    # ── Collect current app state → preset dict ───────────────────────────────
 
     def collect(self, panel, overlay) -> dict:
+        """
+        Build a preset dict from the live state of the control panel and overlay.
+
+        panel  — ControlPanel instance
+        overlay — ChatOverlay instance (may be None before a window is selected)
+        """
         p = _default_preset()
 
         p["shortcuts"] = dict(panel._shortcuts)
@@ -148,8 +212,8 @@ class ConfigManager:
                 "color":        color,
                 "max_messages": overlay.get_max_messages(),
             }
-            p["chat_position"]  = {"x": overlay._pos_x,      "y": overlay._pos_y}
-            p["input_position"] = {"x": overlay._input_pos_x, "y": overlay._input_pos_y}
+            p["chat_position"]  = {"x": overlay._pos_x,       "y": overlay._pos_y}
+            p["input_position"] = {"x": overlay._input_pos_x,  "y": overlay._input_pos_y}
             p["status"] = {
                 "visible":   overlay.get_status_visible(),
                 "x":         overlay._status_pos_x,
@@ -160,12 +224,19 @@ class ConfigManager:
         return p
 
     def save_current(self, name: str, panel, overlay) -> None:
+        """Collect the current app state and store it under the given preset name."""
         self._data.setdefault("presets", {})[name] = self.collect(panel, overlay)
         self._data["active_preset"] = name
 
-    # ── Aplicar preset → estado do app ───────────────────────────────────────
+    # ── Apply preset → app state ──────────────────────────────────────────────
 
     def apply(self, name: str, panel, overlay) -> None:
+        """
+        Apply a named preset to the control panel and overlay.
+
+        Restores shortcuts, translation settings, filters, and visual options.
+        Also re-registers keyboard hooks so the new shortcuts take effect immediately.
+        """
         import tkinter as tk
         preset = self.get_preset(name)
         if preset is None:
@@ -207,7 +278,12 @@ class ConfigManager:
         self._data["active_preset"] = name
 
     def apply_overlay(self, preset_or_name, overlay) -> None:
-        """Aplica somente as configurações visuais ao overlay (pode ser chamado separado)."""
+        """
+        Apply only the visual/positional settings from a preset to the overlay.
+
+        Accepts either a preset name (str) or a preset dict directly so it can
+        be called independently of the full apply() flow.
+        """
         if overlay is None:
             return
         if isinstance(preset_or_name, str):

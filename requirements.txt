@@ -1,0 +1,19 @@
+# Runtime dependencies for SAMP Translate
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# Note: argostranslate offline language packages must be downloaded
+# separately from within the application (Translation → Download packages).
+
+# Process memory access (reads gta_sa.exe chat buffer)
+pymem
+
+# Win32 API bindings (window enumeration, keyboard events, clipboard)
+pywin32
+
+# Global keyboard hooks (hotkeys, text-input capture)
+keyboard
+
+# Offline machine-translation engine
+argostranslate

@@ -1,0 +1,80 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Language
+
+All code, comments, docstrings, and UI strings must be in **English**.
+
+## Commands
+
+```bash
+# Run the main application
+.venv/Scripts/python.exe main.py
+
+# Test the chat reader standalone (no UI, streams chat to console)
+.venv/Scripts/python.exe samp_chat.py
+
+# Install runtime dependencies
+.venv/Scripts/pip install -r requirements.txt
+```
+
+## Architecture
+
+**SA-MP 0.3.DL-R1** — reads the in-game chat via process memory and renders a transparent tkinter overlay.
+
+### Execution flow
+
+```
+main.py  →  ControlPanel (tk.Tk root, always-on-top menu)
+         →  SelectorDialog  (pick the GTA window)
+         →  ChatOverlay     (Toplevel, transparent, click-through)
+         →  Thread: SampChatReader._reader_loop()
+               └─ find_chat_array()  — signature scan at runtime
+               └─ poll() every 200 ms → _raw_queue
+         →  Thread: _translation_loop()
+               └─ argostranslate → _display_queue
+         →  _drain_queue() via after() → ChatOverlay.add_message()
+```
+
+### Modules
+
+**`main.py`** — `ControlPanel` (tk.Tk): main window with status indicator and action buttons. Hosts all dialog classes (ChatStyleDialog, FiltersDialog, TranslationDialog, ShortcutsDialog, PresetsDialog, …). Uses two `queue.Queue` objects for thread-safe communication between reader, translator, and UI.
+
+**`samp_chat.py`** — `SampChatReader` + `find_chat_array()`: reads `gta_sa.exe` memory via `pymem`. The chat buffer is heap-allocated (address changes every session), so `find_chat_array` locates it at runtime using a raw-byte regex signature.
+
+**`window_overlay.py`** — `SelectorDialog` + `ChatOverlay`: Win32 window enumeration dialog and transparent overlay. Click-through is achieved by subclassing the window procedure to return `HTTRANSPARENT` for `WM_NCHITTEST`.
+
+**`config.py`** — `ConfigManager`: loads/saves named configuration presets as JSON in `%APPDATA%/SAMP-Translate/config.json`.
+
+### CChatLine struct — SA-MP 0.3.DL-R1
+
+Determined by memory analysis on 2026-04-19. Not officially documented.
+
+```
+CChatLine  (252 bytes = 0xFC per entry, 100 entries total)
+  +0x00  DWORD  always 0 (reserved)
+  +0x04  DWORD  message type (1–8; 0 = empty slot)
+  +0x08  DWORD  text color ARGB (alpha byte always 0xFF)
+  +0x0C  DWORD  always 0
+  +0x10  ...    internal fields (timestamps, pointers)
+  +0x30  char[] message text (null-terminated, Windows-1252, up to ~204 bytes)
+```
+
+Signature used to locate the array:
+`[\x01-\x0a]\x00\x00\x00...[\x00-\xff]{3}\xff\x00\x00\x00\x00`
+(regex over raw bytes starting at `struct+0x04`), requiring 8+ consecutive entries spaced 0xFC bytes apart.
+
+### Key design decisions
+
+- **`SelectorDialog`** uses `Toplevel` + `grab_set` + `wait_window` when called with `master=` — avoids a second `tk.Tk()`.
+- **`ChatOverlay`** also uses `Toplevel(master)` when integrated into `ControlPanel`, and `stop()` calls `destroy()` (not `quit()`, which would kill the shared mainloop).
+- The Tcl/Tk path fix (`_fix_tcl_paths`) runs at the top of `window_overlay.py` and `main.py` because the venv does not inherit TCL/TK paths from the base Python installation.
+- VS Code uses `.vscode/settings.json` to point to the `.venv` interpreter (required for Pylance to resolve `win32api`, `win32gui`, etc. via `pywin32-stubs`).
+- Translation uses a **producer-consumer** pattern across two queues (`_raw_queue`, `_display_queue`) so memory reading, translation, and UI updates never block each other.
+- argostranslate translators are cached in `_argos_cache[(src, tgt)]` and pre-warmed in a background thread to avoid first-message latency.
+- Indirect translation (src→en→tgt) is attempted automatically when no direct package exists.
+
+### Reverse engineering tools
+
+The `find_chat_offsets*.py` files (if present) are standalone RE tools used to discover the SA-MP memory layout. They are not part of the application and can be ignored or deleted.

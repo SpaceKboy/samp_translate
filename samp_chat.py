@@ -1,17 +1,17 @@
 """
-Leitor de chat do SA-MP 0.3.DL-R1 via leitura de memória (pymem).
+SA-MP 0.3.DL-R1 chat reader via process memory (pymem).
 
-O buffer de chat é heap-alocado, portanto o endereço muda a cada sessão.
-Na inicialização, fazemos um scan por assinatura para localizar o array.
+The chat buffer is heap-allocated, so its base address changes every session.
+On startup we perform a signature scan to locate the CChatLine array at runtime.
 
-Uso:
+Usage:
     reader = SampChatReader()
-    reader.attach()          # conecta ao gta_sa.exe e localiza o buffer
+    reader.attach()          # connect to gta_sa.exe and locate the buffer
 
     for msg in reader.poll():
         print(msg)           # ChatMessage(text, msg_type, color)
 
-    # ou em loop contínuo:
+    # or in a continuous polling loop:
     reader.run(callback=print)
 """
 
@@ -27,40 +27,40 @@ import pymem
 import pymem.process
 
 # ---------------------------------------------------------------------------
-# Layout do struct CChatLine — SA-MP 0.3.DL-R1
-# Determinado via análise de memória em 19/04/2026.
+# CChatLine struct layout — SA-MP 0.3.DL-R1
+# Determined via memory analysis on 2026-04-19. Not officially documented.
 #
-#   +0x00  DWORD  — sempre 0 (reservado)
-#   +0x04  DWORD  — tipo da mensagem (1-8; 0 = slot vazio)
-#   +0x08  DWORD  — cor ARGB do texto  (byte alpha sempre 0xFF)
-#   +0x0C  DWORD  — sempre 0
-#   +0x10  ...    — campos internos (timestamps, ponteiros)
-#   +0x30  char[] — texto da mensagem (null-terminated, até ~200 bytes)
+#   +0x00  DWORD  — always 0 (reserved/padding)
+#   +0x04  DWORD  — message type (1–8; 0 = empty slot)
+#   +0x08  DWORD  — text color as ARGB  (alpha byte is always 0xFF)
+#   +0x0C  DWORD  — always 0
+#   +0x10  ...    — internal fields (timestamps, pointers)
+#   +0x30  char[] — message text (null-terminated, up to ~200 bytes)
 # ---------------------------------------------------------------------------
 
-_ENTRY_SIZE : int = 0xFC   # 252 bytes por entrada
-_MAX_LINES  : int = 100
+_ENTRY_SIZE: int = 0xFC  # 252 bytes per chat entry
+_MAX_LINES:  int = 100   # ring buffer holds 100 slots
 
-_LINE_TYPE  : int = 0x04   # DWORD — tipo
-_LINE_COLOR : int = 0x08   # DWORD — cor ARGB
-_LINE_TEXT  : int = 0x30   # char[] — texto
+_LINE_TYPE:  int = 0x04  # DWORD — message type
+_LINE_COLOR: int = 0x08  # DWORD — ARGB color
+_LINE_TEXT:  int = 0x30  # char[] — null-terminated text
 
-_TEXT_MAX   : int = _ENTRY_SIZE - _LINE_TEXT   # espaço restante (~204 bytes)
+_TEXT_MAX: int = _ENTRY_SIZE - _LINE_TEXT  # remaining space for text (~204 bytes)
 
-# Padrão de bytes em struct+0x04 .. struct+0x0F:
-#   type  DWORD (1-10)  +  color com alpha=FF  +  DWORD 0
-#   Buscado com regex sobre os bytes crus (sem assumir alinhamento de 4 bytes).
+# Byte pattern matched at struct+0x04 through struct+0x0F:
+#   type DWORD (1–10) | ARGB color with alpha=FF | zero DWORD
+# Applied as a raw-byte regex so alignment assumptions are unnecessary.
 _ENTRY_PATTERN = re.compile(
-    b'[\x01-\x0a]\x00\x00\x00'   # type DWORD, valor 1-10
-    b'[\x00-\xff]{3}\xff'         # color ARGB, alpha=FF
-    b'\x00\x00\x00\x00'          # DWORD seguinte = 0
+    b'[\x01-\x0a]\x00\x00\x00'   # type DWORD, value 1–10
+    b'[\x00-\xff]{3}\xff'         # ARGB color, alpha byte = FF
+    b'\x00\x00\x00\x00'          # next DWORD = 0
 )
-_PATTERN_OFF        : int = 0x04   # padrão começa em struct+0x04
-_SIG_MIN_CONSECUTIVE: int = 8      # entradas consecutivas para confirmar
+_PATTERN_OFF:         int = 0x04  # pattern starts at struct+0x04
+_SIG_MIN_CONSECUTIVE: int = 8     # minimum consecutive valid entries required to confirm array
 
 # ---------------------------------------------------------------------------
 
-# Tipos conhecidos (não exaustivo — 0.3.DL pode ter mais)
+# Known message types (non-exhaustive — 0.3.DL may define more)
 LINE_TYPE_NONE   = 0
 LINE_TYPE_DEBUG  = 1
 LINE_TYPE_CHAT   = 2
@@ -70,24 +70,27 @@ LINE_TYPE_ACTION = 8
 
 @dataclass(frozen=True)
 class ChatMessage:
+    """Immutable snapshot of a single SA-MP chat line."""
     text:     str
     msg_type: int
-    color:    int   # ARGB
+    color:    int   # ARGB packed as a 32-bit integer
 
     def __str__(self) -> str:
         return self.text
 
 
 # ---------------------------------------------------------------------------
-# Scan de memória
+# Memory scanning helpers
 # ---------------------------------------------------------------------------
 
+# Windows memory protection constants for readable pages
 _PAGE_READABLE = {0x02, 0x04, 0x20, 0x40}
 _MEM_COMMIT    = 0x1000
 _kernel32      = ctypes.WinDLL("kernel32", use_last_error=True)
 
 
 class _MBI(ctypes.Structure):
+    """MEMORY_BASIC_INFORMATION — returned by VirtualQueryEx."""
     _fields_ = [
         ("BaseAddress",       ctypes.c_void_p),
         ("AllocationBase",    ctypes.c_void_p),
@@ -100,6 +103,7 @@ class _MBI(ctypes.Structure):
 
 
 def _iter_regions(handle):
+    """Yield (base_address, size) for every committed, readable memory region in the process."""
     addr = 0
     mbi  = _MBI()
     sz   = ctypes.sizeof(mbi)
@@ -114,9 +118,13 @@ def _iter_regions(handle):
 
 def find_chat_array(pm: pymem.Pymem) -> int | None:
     """
-    Escaneia a memória do processo procurando o array de CChatLine.
-    Usa regex sobre bytes brutos para não depender de alinhamento de endereço.
-    Retorna o endereço absoluto do primeiro slot do array, ou None.
+    Scan process memory for the CChatLine array.
+
+    Uses a raw-byte regex so no address-alignment assumptions are needed.
+    Returns the absolute address of the first slot, or None if not found.
+
+    The scan skips regions larger than 64 MB to avoid heap arenas that are
+    unlikely to contain a compact 25 KB chat buffer.
     """
     handle = pm.process_handle
     for region_base, region_size in _iter_regions(handle):
@@ -127,7 +135,7 @@ def find_chat_array(pm: pymem.Pymem) -> int | None:
         except Exception:
             continue
 
-        # Coleta todas as posições onde o padrão casa (= struct+0x04 de cada entrada)
+        # Collect all byte offsets where the entry pattern matches (= struct+0x04)
         hits = [m.start() for m in _ENTRY_PATTERN.finditer(data)]
         if len(hits) < _SIG_MIN_CONSECUTIVE:
             continue
@@ -135,7 +143,7 @@ def find_chat_array(pm: pymem.Pymem) -> int | None:
         hit_set = set(hits)
 
         for h in hits:
-            # Verifica se há entradas consecutivas espaçadas de _ENTRY_SIZE
+            # Count how many consecutive entries are spaced exactly _ENTRY_SIZE apart
             count = 1
             while (h + count * _ENTRY_SIZE) in hit_set:
                 count += 1
@@ -145,7 +153,7 @@ def find_chat_array(pm: pymem.Pymem) -> int | None:
             if count < _SIG_MIN_CONSECUTIVE:
                 continue
 
-            # Encontrou sequência válida — recua para o primeiro slot do array
+            # Valid sequence found — walk backward to find slot 0 of the array
             struct_start = h - _PATTERN_OFF
             while struct_start >= _ENTRY_SIZE:
                 prev_pat = struct_start - _ENTRY_SIZE + _PATTERN_OFF
@@ -160,37 +168,52 @@ def find_chat_array(pm: pymem.Pymem) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# Reader principal
+# Chat reader
 # ---------------------------------------------------------------------------
 
 class SampChatReader:
-    """Lê o chat do SA-MP 0.3.DL-R1 via memória do processo gta_sa.exe."""
+    """
+    Reads the SA-MP 0.3.DL-R1 chat buffer from gta_sa.exe memory.
+
+    Thread-safety: attach() and poll() may be called from a background thread,
+    but must not be called concurrently with each other.
+    """
 
     def __init__(self):
         self._pm:           pymem.Pymem | None = None
         self._array_base:   int = 0
-        self._prev_counter: dict[str, int] = {}  # key → count in last snapshot
+        # Stores (key → count) from the previous poll snapshot for deduplication
+        self._prev_counter: dict[str, int] = {}
 
     # ------------------------------------------------------------------
-    # Conexão
+    # Connection
     # ------------------------------------------------------------------
 
     def attach(self) -> None:
-        """Conecta ao gta_sa.exe, aguarda samp.dll e localiza o buffer de chat."""
+        """
+        Connect to gta_sa.exe, verify samp.dll is loaded, and locate the chat buffer.
+
+        Raises RuntimeError if gta_sa.exe is not running, samp.dll is absent,
+        or the chat array cannot be found (e.g. not yet connected to a server).
+        """
         self._pm = pymem.Pymem("gta_sa.exe")
 
         samp_mod = pymem.process.module_from_name(self._pm.process_handle, "samp.dll")
         if samp_mod is None:
-            raise RuntimeError("samp.dll não encontrado — SA-MP está aberto e conectado a um servidor?")
+            raise RuntimeError(
+                "samp.dll not found — is SA-MP running and connected to a server?"
+            )
 
         addr = find_chat_array(self._pm)
         if addr is None:
             raise RuntimeError(
-                "Buffer de chat não encontrado. "
-                "Certifique-se de estar conectado a um servidor com mensagens no chat."
+                "Chat buffer not found. "
+                "Make sure you are connected to a server with at least some chat messages."
             )
         self._array_base = addr
-        # Seed counter with current buffer so first poll() sees no history.
+
+        # Seed the counter with the current buffer contents so that the first
+        # poll() call does not re-emit the entire history.
         counter: dict[str, int] = {}
         for msg in self._snapshot():
             if msg is not None:
@@ -199,6 +222,7 @@ class SampChatReader:
         self._prev_counter = counter
 
     def is_attached(self) -> bool:
+        """Return True if the process is still running and samp.dll is loaded."""
         try:
             return self._pm is not None and bool(
                 pymem.process.module_from_name(self._pm.process_handle, "samp.dll")
@@ -207,10 +231,11 @@ class SampChatReader:
             return False
 
     # ------------------------------------------------------------------
-    # Leitura interna
+    # Internal reading
     # ------------------------------------------------------------------
 
     def _read_line(self, index: int) -> ChatMessage | None:
+        """Read a single chat slot at the given index. Returns None for empty slots."""
         if not self._array_base:
             return None
         addr = self._array_base + index * _ENTRY_SIZE
@@ -221,7 +246,8 @@ class SampChatReader:
 
             color    = self._pm.read_int(addr + _LINE_COLOR)
             raw_text = self._pm.read_bytes(addr + _LINE_TEXT, _TEXT_MAX)
-            text     = raw_text.split(b"\x00", 1)[0].decode("windows-1252", errors="replace").strip()
+            # SA-MP encodes chat text in Windows-1252 (Western European code page)
+            text = raw_text.split(b"\x00", 1)[0].decode("windows-1252", errors="replace").strip()
 
             if not text:
                 return None
@@ -231,18 +257,21 @@ class SampChatReader:
             return None
 
     def _snapshot(self) -> list[ChatMessage | None]:
+        """Dump all 100 chat slots into a list (None for empty slots)."""
         return [self._read_line(i) for i in range(_MAX_LINES)]
 
     # ------------------------------------------------------------------
-    # API pública
+    # Public API
     # ------------------------------------------------------------------
 
     def poll(self) -> Iterator[ChatMessage]:
-        """Retorna apenas mensagens novas desde o último poll().
+        """
+        Yield only messages that are new since the last poll() call.
 
-        Compara contagens de conteúdo (não índices) para ser imune ao
-        deslocamento do ring buffer. Mensagens repetidas são detectadas
-        quando sua contagem no buffer aumenta.
+        Uses content-count comparison instead of index tracking so the method
+        is immune to the ring buffer rotating between polls. A repeated message
+        (same type + text) is considered new only when its count in the buffer
+        has increased since the last snapshot.
         """
         current     = self._snapshot()
         new_counter: dict[str, int] = {}
@@ -273,37 +302,41 @@ class SampChatReader:
         callback: Callable[[ChatMessage], None],
         interval: float = 0.3,
     ) -> None:
-        """Loop contínuo: chama callback(msg) para cada nova mensagem."""
-        print("Aguardando mensagens do SA-MP… (Ctrl+C para parar)")
+        """
+        Continuous polling loop — calls callback(msg) for every new message.
+
+        Blocks until the process exits or a KeyboardInterrupt is received.
+        """
+        print("Waiting for SA-MP messages… (Ctrl+C to stop)")
         while True:
             try:
                 if not self.is_attached():
-                    print("Processo encerrado.")
+                    print("Process has exited.")
                     break
                 for msg in self.poll():
                     callback(msg)
                 time.sleep(interval)
             except KeyboardInterrupt:
-                print("\nEncerrado pelo usuário.")
+                print("\nStopped by user.")
                 break
             except Exception as exc:
-                print(f"[erro] {exc}")
+                print(f"[error] {exc}")
                 time.sleep(1.0)
 
 
 # ---------------------------------------------------------------------------
-# Execução direta — teste rápido
+# Direct execution — quick smoke test
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("Conectando ao gta_sa.exe…")
+    print("Connecting to gta_sa.exe…")
     reader = SampChatReader()
     try:
         reader.attach()
-        print(f"Buffer de chat localizado em: 0x{reader._array_base:08X}")
+        print(f"Chat buffer found at: 0x{reader._array_base:08X}")
         print(f"({_MAX_LINES} slots × {_ENTRY_SIZE} bytes = {_MAX_LINES * _ENTRY_SIZE} bytes)\n")
     except Exception as e:
-        print(f"Falha: {e}")
+        print(f"Failed: {e}")
         raise SystemExit(1)
 
     reader.run(callback=lambda msg: print(f"[type={msg.msg_type}] {msg}"))

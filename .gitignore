@@ -1,14 +1,15 @@
-# Ambiente virtual
+# Virtual environment
 .venv/
 
-# Python
+# Python bytecode and compiled extensions
 __pycache__/
 *.py[cod]
 *.pyd
 
-# Variáveis de ambiente
+# Environment variable files
 .env
 .env.*
 
-# Claude
-CLAUDE.md
+# OS-generated files
+Thumbs.db
+.DS_Store
