@@ -892,11 +892,12 @@ class TranslationDialog:
     """
 
     def __init__(self, master: tk.Misc, translation: dict,
-                 check_fn, download_fn, get_installed_fn):
+                 check_fn, download_fn, get_installed_fn, delete_fn):
         self._translation      = translation
         self._check_fn         = check_fn
         self._download_fn      = download_fn
         self._get_installed_fn = get_installed_fn
+        self._delete_fn        = delete_fn
 
         self.root = tk.Toplevel(master)
         self.root.title("Translation")
@@ -999,16 +1000,60 @@ class TranslationDialog:
             ).pack(anchor="w", pady=(2, 0))
             return
 
+        self._installed_pairs = pairs  # kept for delete lookup
         pair_names = [
             f"{CODE_TO_LANG.get(src, src)} → {CODE_TO_LANG.get(tgt, tgt)}"
             for src, tgt in pairs
         ]
         self._installed_pkg_var = tk.StringVar(value=pair_names[0])
-        om = tk.OptionMenu(self._installed_pkg_frame, self._installed_pkg_var, *pair_names)
+
+        row = tk.Frame(self._installed_pkg_frame, bg=BG_PANEL)
+        row.pack(anchor="w", pady=(2, 0), fill="x")
+
+        om = tk.OptionMenu(row, self._installed_pkg_var, *pair_names)
         om.config(bg=BG, fg=ACCENT, relief="flat", activebackground=ACCENT,
-                  activeforeground="#000", highlightthickness=0, width=26)
+                  activeforeground="#000", highlightthickness=0, width=22)
         om["menu"].config(bg=BG, fg=ACCENT)
-        om.pack(anchor="w", pady=(2, 0))
+        om.pack(side="left")
+
+        tk.Button(
+            row, text="Delete",
+            command=self._delete_selected_package,
+            bg=BG_PANEL, fg="#ff6666", relief="flat", padx=8, pady=2,
+            activebackground="#ff6666", activeforeground="#000", cursor="hand2",
+        ).pack(side="left", padx=(8, 0))
+
+    def _delete_selected_package(self) -> None:
+        pairs = getattr(self, "_installed_pairs", [])
+        if not pairs:
+            return
+        pair_names = [
+            f"{CODE_TO_LANG.get(src, src)} → {CODE_TO_LANG.get(tgt, tgt)}"
+            for src, tgt in pairs
+        ]
+        selected = self._installed_pkg_var.get()
+        try:
+            idx = pair_names.index(selected)
+        except ValueError:
+            return
+        src, tgt = pairs[idx]
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+            "Delete Package",
+            f'Delete "{selected}"?\n\nThis cannot be undone.',
+            parent=self.root,
+        ):
+            return
+
+        def on_done(ok: bool):
+            if ok:
+                self._refresh_installed_dropdown()
+                self._refresh_status()
+                self._refresh_user_status()
+            else:
+                messagebox.showerror("Error", "Failed to delete package.", parent=self.root)
+
+        self._delete_fn(src, tgt, on_done)
 
     def _make_lang_dropdown(self, parent, var, on_change) -> tk.OptionMenu:
         """
@@ -2000,6 +2045,36 @@ class ControlPanel:
         except Exception:
             return []
 
+    def _delete_argos_package(self, src: str, tgt: str, on_done) -> None:
+        """Delete the installed argostranslate package for src→tgt in a background thread."""
+        def _worker():
+            try:
+                import argostranslate.settings as argo_settings
+                import json, shutil
+                packages_dir = argo_settings.data_dir / "packages"
+                deleted = False
+                if packages_dir.exists():
+                    for entry in packages_dir.iterdir():
+                        if not entry.is_dir():
+                            continue
+                        meta_file = entry / "metadata.json"
+                        if not meta_file.exists():
+                            continue
+                        try:
+                            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                            if meta.get("from_code") == src and meta.get("to_code") == tgt:
+                                shutil.rmtree(str(entry), ignore_errors=True)
+                                deleted = True
+                        except Exception:
+                            continue
+                self._argos_cache.pop((src, tgt), None)
+                self.root.after(0, lambda: on_done(deleted))
+            except Exception as e:
+                print(f"[argos-delete] {e}")
+                self.root.after(0, lambda: on_done(False))
+
+        threading.Thread(target=_worker, daemon=True, name="argos-delete").start()
+
     def _open_translation_dialog(self) -> None:
         TranslationDialog(
             master=self.root,
@@ -2007,6 +2082,7 @@ class ControlPanel:
             check_fn=self._check_argos_installed,
             download_fn=self._download_argos_packages,
             get_installed_fn=self._get_installed_pairs,
+            delete_fn=self._delete_argos_package,
         )
 
     # ── Connection status ─────────────────────────────────────────────────────
