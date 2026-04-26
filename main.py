@@ -1114,6 +1114,7 @@ class TranslationDialog:
                 self._lbl_pkg_status.config(text="✓ Installed successfully!", fg=ACCENT)
                 self._btn_download.config(text="Download packages", state="disabled", fg=FG_DIM)
                 self._refresh_installed_dropdown()
+                self._refresh_user_status()  # same package serves both channels
             else:
                 self._lbl_pkg_status.config(text="✗ Download failed.", fg="#ff6666")
                 self._btn_download.config(text="Download packages", state="normal", fg=ACCENT)
@@ -1132,6 +1133,7 @@ class TranslationDialog:
                 self._lbl_user_pkg_status.config(text="✓ Installed successfully!", fg=ACCENT)
                 self._btn_user_download.config(text="Download packages", state="disabled", fg=FG_DIM)
                 self._refresh_installed_dropdown()
+                self._refresh_status()  # same package serves both channels
             else:
                 self._lbl_user_pkg_status.config(text="✗ Download failed.", fg="#ff6666")
                 self._btn_user_download.config(text="Download packages", state="normal", fg=ACCENT)
@@ -1952,6 +1954,7 @@ class ControlPanel:
         def _worker():
             try:
                 import argostranslate.package as ap
+                import argostranslate.translate as at
                 ap.update_package_index()
                 avail_map = {(p.from_code, p.to_code): p for p in ap.get_available_packages()}
 
@@ -1964,8 +1967,17 @@ class ControlPanel:
                     self.root.after(0, lambda: on_done(False))
                     return
 
+                # Skip packages that are already installed to avoid redundant downloads.
+                # Server Chat and User Chat share the same offline packages, so a pair
+                # downloaded for one channel is immediately available for the other.
+                installed = {
+                    (lang.code, t.to_lang.code)
+                    for lang in at.get_installed_languages()
+                    for t in lang.translations_from
+                }
                 for pkg in pkgs:
-                    ap.install_from_path(pkg.download())
+                    if (pkg.from_code, pkg.to_code) not in installed:
+                        ap.install_from_path(pkg.download())
 
                 self._argos_cache.pop((src, tgt), None)
                 self._prewarm_translator(src, tgt)
