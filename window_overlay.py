@@ -97,9 +97,11 @@ def list_visible_windows() -> list[tuple[int, str, str]]:
                 win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ,
                 False, pid,
             )
-            path = win32process.GetModuleFileNameEx(h, 0)
-            win32api.CloseHandle(h)
-            proc_name = path.split("\\")[-1]
+            try:
+                path = win32process.GetModuleFileNameEx(h, 0)
+                proc_name = path.split("\\")[-1]
+            finally:
+                win32api.CloseHandle(h)
         except Exception:
             proc_name = "?"
         windows.append((hwnd, title, proc_name))

@@ -619,7 +619,13 @@ class FiltersDialog:
             row = tk.Frame(self._list_frame, bg=BG_PANEL, padx=10, pady=8)
             row.pack(fill="x", pady=(0, 6))
 
-            f["var"].trace_add("write", lambda *_: self._on_toggle())
+            old = f.pop("_on_toggle_trace", None)
+            if old is not None:
+                try:
+                    f["var"].trace_remove("write", old)
+                except Exception:
+                    pass
+            f["_on_toggle_trace"] = f["var"].trace_add("write", lambda *_: self._on_toggle())
 
             tk.Label(
                 row, text=f"[{flabel}]",
@@ -1630,6 +1636,8 @@ class ControlPanel:
         self._toggle_kb_hook   = None
         self._clear_kb_hook    = None
         self._filters_kb_hook  = None
+        self._samp_send_inject: int = 0  # lets injected 'T' pass through the chat hook
+        self._drain_scheduled:  bool = False
 
         self._translate_active: bool = True   # controlled by the toggle hotkey
         self._filters_enabled:  bool = True   # controlled by the filters hotkey
@@ -1771,6 +1779,10 @@ class ControlPanel:
     def _start_reader(self) -> None:
         if self._reader_thread and self._reader_thread.is_alive():
             return
+        # Stop the old translator (blocked on queue.get()) via a sentinel before
+        # starting a new one, so messages are never split across two translators.
+        if self._translator_thread and self._translator_thread.is_alive():
+            self._raw_queue.put(None)
         self._reader_thread = threading.Thread(
             target=self._reader_loop, daemon=True, name="samp-chat-reader",
         )
@@ -1779,7 +1791,9 @@ class ControlPanel:
         )
         self._reader_thread.start()
         self._translator_thread.start()
-        self.root.after(POLL_INTERVAL_MS, self._drain_queue)
+        if not self._drain_scheduled:
+            self._drain_scheduled = True
+            self.root.after(POLL_INTERVAL_MS, self._drain_queue)
 
     def _reader_loop(self) -> None:
         """
@@ -1814,7 +1828,9 @@ class ControlPanel:
         """
         while True:
             try:
-                msg        = self._raw_queue.get()
+                msg = self._raw_queue.get()
+                if msg is None:  # sentinel sent by _start_reader on reconnect
+                    break
                 translated = self._try_translate(msg)
                 self._display_queue.put((msg, translated))  # (original, translated)
             except Exception:
@@ -2109,6 +2125,11 @@ class ControlPanel:
                         _inject_count[0] -= 1
                         return  # let this re-injected event reach other apps
                     if win32gui.GetForegroundWindow() == self._hwnd:
+                        if self._samp_send_inject > 0:
+                            # _send_to_samp injected this key to open SA-MP chat;
+                            # pass it through instead of re-opening the overlay.
+                            self._samp_send_inject -= 1
+                            return
                         # GTA is focused: suppress the key so SA-MP never opens
                         # its native chat, then open our overlay instead.
                         self.root.after(0, self._show_send_input)
@@ -2289,6 +2310,10 @@ class ControlPanel:
             win32gui.SetForegroundWindow(self._hwnd)
             time.sleep(0.15)
 
+            # If chat_key is 'T', the hook would suppress this injection and
+            # reopen the overlay; signal it to pass through to SA-MP instead.
+            if self._shortcuts.get("chat_key", "").lower() == "t":
+                self._samp_send_inject += 1
             win32api.keybd_event(ord('T'), 0, 0, 0)
             time.sleep(0.03)
             win32api.keybd_event(ord('T'), 0, win32con.KEYEVENTF_KEYUP, 0)
