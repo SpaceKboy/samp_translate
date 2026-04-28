@@ -72,8 +72,8 @@ Signature used to locate the array:
 - The Tcl/Tk path fix (`_fix_tcl_paths`) runs at the top of `window_overlay.py` and `main.py` because the venv does not inherit TCL/TK paths from the base Python installation.
 - VS Code uses `.vscode/settings.json` to point to the `.venv` interpreter (required for Pylance to resolve `win32api`, `win32gui`, etc. via `pywin32-stubs`).
 - Translation uses a **producer-consumer** pattern across two queues (`_raw_queue`, `_display_queue`) so memory reading, translation, and UI updates never block each other.
-- argostranslate translators are cached in `_argos_cache[(src, tgt)]` and pre-warmed in a background thread to avoid first-message latency.
-- Indirect translation (src→en→tgt) is attempted automatically when no direct package exists.
+- `_argos_cache` maps `(src_code, tgt_code)` → `list[translator]` (1, 2, or 3 elements). Built atomically by `_rebuild_route_cache()` in a background thread whenever packages are installed/deleted or translation is enabled.
+- Routes support up to **three hops** (e.g. `es→pt→en→it`) to work around broken or missing direct packages. The builder runs three passes: direct → two-hop → three-hop; shorter routes always take priority.
 
 #### Keyboard hooks
 
@@ -83,7 +83,11 @@ Signature used to locate the array:
 
 #### Translation startup
 
-- `_apply_startup_config()` calls `_on_translation_toggle()` explicitly **after** `config.apply()` returns. The `trace_add("write", …)` callback on `_translation["enabled"]` fires during `apply()` before `source`/`target` are set, so the prewarm inside the callback receives `_PLACEHOLDER` values and does nothing. The explicit post-apply call runs with all settings populated and actually warms the cache.
+- `_apply_startup_config()` calls `_on_translation_toggle()` explicitly **after** `config.apply()` returns. The `trace_add("write", …)` callback on `_translation["enabled"]` fires during `apply()` before `source`/`target` are set, so the cache rebuild triggered by the callback is a no-op (translation not yet enabled with valid languages). The explicit post-apply call runs with all settings populated and actually starts `_rebuild_route_cache()`.
+
+#### BPE package detection
+
+- Some argostranslate packages (e.g. `es→en` v1.9) use BPE vocabulary format (`@@`-suffix tokens in `shared_vocabulary.json`), which is incompatible with ctranslate2 v4 and produces infinite-loop garbled output. `_rebuild_route_cache()` inspects every installed package's vocabulary file and excludes BPE packages from all routes (direct and multi-hop). Detection: count `@@`-suffix tokens vs `▁` (U+2581) SentencePiece tokens; if BPE count exceeds SentencePiece count the package is broken.
 
 #### Presets
 

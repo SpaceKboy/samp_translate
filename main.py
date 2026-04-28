@@ -1671,9 +1671,10 @@ class ControlPanel:
             "user_target":  tk.StringVar(value=LANG_PLACEHOLDER),
         }
 
-        # Cache of (src_code, tgt_code) → argostranslate.Translator to avoid
-        # re-loading the translation model on every message
+        # Route cache: (src_code, tgt_code) → translator  OR  (t1, t2) for 2-hop.
+        # Rebuilt from scratch whenever packages are installed/deleted.
         self._argos_cache: dict = {}
+        self._rebuild_in_progress: bool = False
 
         self._translation["enabled"].trace_add("write", self._on_translation_toggle)
         self._translation["user_enabled"].trace_add("write", self._on_translation_toggle)
@@ -1883,13 +1884,37 @@ class ControlPanel:
             except Exception:
                 pass
 
-    def _try_translate(self, msg):
-        """
-        Attempt to translate a message using the cached argostranslate translator.
+    @staticmethod
+    def _is_garbled(text: str, source: str) -> bool:
+        """Return True if translation output looks like a stuck-model loop."""
+        if not text:
+            return False
+        if len(text) > len(source) * 5 and len(text) > 200:
+            return True
+        if len(text) >= 32:
+            chunk = text[:80]
+            for i in range(len(chunk) - 8):
+                if chunk.count(chunk[i:i + 8]) >= 4:
+                    return True
+        return False
 
-        Falls back to the original message on any error (missing package, etc.).
-        Supports direct translation (src→tgt) and indirect routing (src→en→tgt).
-        """
+    def _translate_text(self, text: str, src: str, tgt: str) -> str:
+        """Translate text using the route cache. Returns original on any failure."""
+        route = self._argos_cache.get((src, tgt))
+        if route is None:
+            return text
+        try:
+            result = text
+            for t in route:
+                result = t.translate(result)
+                if self._is_garbled(result, text):
+                    return text
+            return result if result else text
+        except Exception:
+            return text
+
+    def _try_translate(self, msg):
+        """Translate a ChatMessage; returns original on failure or when disabled."""
         if not self._translation["enabled"].get():
             return msg
         if self._no_translate_commands.get() and msg.text.lstrip().startswith("/"):
@@ -1898,98 +1923,137 @@ class ControlPanel:
         tgt = ALL_LANGUAGES.get(self._translation["target"].get())
         if not src or not tgt or src == tgt:
             return msg
-        try:
-            # Direct translation (uses cached translator object)
-            t = self._argos_cache.get((src, tgt))
-            if t:
-                result = t.translate(msg.text)
-                return dataclasses.replace(msg, text=result or msg.text)
-
-            # Indirect route via English: src→en→tgt
-            if src != "en" and tgt != "en":
-                t1 = self._argos_cache.get((src, "en"))
-                t2 = self._argos_cache.get(("en", tgt))
-                if t1 and t2:
-                    result = t2.translate(t1.translate(msg.text))
-                    return dataclasses.replace(msg, text=result or msg.text)
-        except Exception:
-            pass
+        result = self._translate_text(msg.text, src, tgt)
+        if result != msg.text:
+            return dataclasses.replace(msg, text=result)
         return msg
 
-    def _prewarm_translator(self, src: str, tgt: str) -> None:
+    def _rebuild_route_cache(self) -> None:
         """
-        Load the argostranslate Translator object in a background thread.
+        Rebuild the translation route cache in a background thread.
 
-        Called when translation is enabled or when a language pair changes,
-        so the first message is not delayed by model loading.
+        Reads every installed package, discards BPE-format ones (incompatible
+        with ctranslate2 v4 — produce looping garbage output), then builds:
+          • direct routes  — one package from src to tgt
+          • two-hop routes — src→bridge→tgt using two direct packages
+
+        The entire cache is replaced atomically when the worker finishes, so
+        in-flight translations always see a consistent snapshot.
         """
+        if self._rebuild_in_progress:
+            return
+        self._rebuild_in_progress = True
+
         def _worker():
             try:
                 import argostranslate.translate as at
-                lang_map  = {l.code: l for l in at.get_installed_languages()}
-                from_lang = lang_map.get(src)
-                to_lang   = lang_map.get(tgt)
-                if not from_lang or not to_lang:
-                    return
+                import argostranslate.package as ap
+                import argostranslate.settings as s
+                import json
 
-                # Try direct route first
-                t = from_lang.get_translation(to_lang)
-                if t:
-                    self._argos_cache[(src, tgt)] = t
-                    return
+                # ── Detect BPE-broken packages ────────────────────────────────
+                # Packages whose shared_vocabulary.json uses @@ BPE tokens are
+                # incompatible with ctranslate2 v4 and produce looping output.
+                # Packages using .txt vocab or a sentencepiece.model are fine.
+                broken: set = set()
+                pkgs_dir = s.data_dir / "packages"
+                if pkgs_dir.exists():
+                    for d in pkgs_dir.iterdir():
+                        if not d.is_dir():
+                            continue
+                        meta_f = d / "metadata.json"
+                        if not meta_f.exists():
+                            continue
+                        try:
+                            meta = json.loads(meta_f.read_text(encoding="utf-8"))
+                            vocab_f = d / "model" / "shared_vocabulary.json"
+                            if not vocab_f.exists():
+                                continue
+                            vocab = json.loads(vocab_f.read_text())
+                            bpe = sum(1 for tok in vocab if tok.endswith("@@"))
+                            spm = sum(1 for tok in vocab if chr(0x2581) in tok)
+                            if bpe > spm:
+                                broken.add((meta["from_code"], meta["to_code"]))
+                        except Exception:
+                            continue
 
-                # Fall back to indirect route via English
-                if src != "en" and tgt != "en":
-                    en_lang = lang_map.get("en")
-                    if en_lang:
-                        t1 = from_lang.get_translation(en_lang)
-                        t2 = en_lang.get_translation(to_lang)
-                        if t1:
-                            self._argos_cache[(src, "en")] = t1
-                        if t2:
-                            self._argos_cache[("en", tgt)] = t2
+                # ── Load direct translators ───────────────────────────────────
+                # Use ap.get_installed_packages() (reads disk, no lru_cache) to
+                # get only actually-installed packages, not computed composites.
+                lang_map = {l.code: l for l in at.get_installed_languages()}
+                direct: dict = {}
+                for pkg in ap.get_installed_packages():
+                    pair = (pkg.from_code, pkg.to_code)
+                    if pair in broken:
+                        continue
+                    fl = lang_map.get(pkg.from_code)
+                    tl = lang_map.get(pkg.to_code)
+                    if not fl or not tl:
+                        continue
+                    t = fl.get_translation(tl)
+                    if t:
+                        direct[pair] = t
+
+                # ── Build route cache ─────────────────────────────────────────
+                # Each route is a list of translators applied in order.
+                # Direct packages take priority; longer chains only fill gaps.
+                routes: dict = {pair: [t] for pair, t in direct.items()}
+
+                # Two-hop: (a→b) + (b→c) → (a→c)
+                for (a, b), t1 in direct.items():
+                    for (c, d), t2 in direct.items():
+                        if b != c:
+                            continue
+                        if (a, d) not in routes:
+                            routes[(a, d)] = [t1, t2]
+
+                # Three-hop: extend two-hop routes with one more direct leg.
+                # Example: es→pt→en (two-hop) + en→it (direct) → es→pt→en→it
+                for (a, b), chain in list(routes.items()):
+                    if len(chain) != 2:
+                        continue
+                    for (c, d), t3 in direct.items():
+                        if b != c:
+                            continue
+                        if (a, d) not in routes:
+                            routes[(a, d)] = chain + [t3]
+
+                self._argos_cache = routes          # atomic replacement
             except Exception:
                 pass
+            finally:
+                self._rebuild_in_progress = False
 
-        if (src, tgt) not in self._argos_cache:
-            threading.Thread(target=_worker, daemon=True, name="argos-prewarm").start()
+        threading.Thread(target=_worker, daemon=True, name="argos-rebuild").start()
 
     def _on_translation_toggle(self, *_) -> None:
         """Called when the translation enabled checkbox changes state."""
         if self._translation["enabled"].get():
-            # Clear the raw queue so old messages are not translated with the new settings
             while not self._raw_queue.empty():
                 try:
                     self._raw_queue.get_nowait()
                 except queue.Empty:
                     break
-            src = ALL_LANGUAGES.get(self._translation["source"].get())
-            tgt = ALL_LANGUAGES.get(self._translation["target"].get())
-            if src and tgt:
-                self._prewarm_translator(src, tgt)
-        if self._translation["user_enabled"].get():
-            u_src = ALL_LANGUAGES.get(self._translation["user_source"].get())
-            u_tgt = ALL_LANGUAGES.get(self._translation["user_target"].get())
-            if u_src and u_tgt:
-                self._prewarm_translator(u_src, u_tgt)
+        if self._translation["enabled"].get() or self._translation["user_enabled"].get():
+            self._rebuild_route_cache()
 
     def _check_argos_installed(self, src: str, tgt: str) -> bool:
-        """Return True if argostranslate has a working translation route for src→tgt."""
+        """Return True if argostranslate has an installed package for src→tgt (direct or bridge)."""
         try:
             import argostranslate.translate as at
-            lang_map  = {l.code: l for l in at.get_installed_languages()}
-            from_lang = lang_map.get(src)
-            to_lang   = lang_map.get(tgt)
-            if not from_lang or not to_lang:
-                return False
-            if from_lang.get_translation(to_lang) is not None:
+            # Inspect raw packages so we check what is actually installed on disk,
+            # not argostranslate's computed composite translations.
+            import argostranslate.package as ap
+            installed = {(p.from_code, p.to_code) for p in ap.get_installed_packages()}
+            if (src, tgt) in installed:
                 return True
-            # Check indirect route via English
-            if src != "en" and tgt != "en":
-                en = lang_map.get("en")
-                if en:
-                    return (from_lang.get_translation(en) is not None and
-                            en.get_translation(to_lang) is not None)
+            # Check for any two-hop route via an installed bridge package
+            bridges = {code for code, _ in installed} | {code for _, code in installed}
+            for bridge in bridges:
+                if bridge in (src, tgt):
+                    continue
+                if (src, bridge) in installed and (bridge, tgt) in installed:
+                    return True
             return False
         except Exception:
             return False
@@ -2024,8 +2088,8 @@ class ControlPanel:
                     if (pkg.from_code, pkg.to_code) not in installed:
                         ap.install_from_path(pkg.download())
 
-                self._argos_cache.pop((src, tgt), None)
-                self._prewarm_translator(src, tgt)
+                at.get_installed_languages.cache_clear()
+                self.root.after(0, self._rebuild_route_cache)
                 self.root.after(0, lambda: on_done(True))
             except Exception as e:
                 print(f"[argos-download] {e}")
@@ -2036,12 +2100,8 @@ class ControlPanel:
     def _get_installed_pairs(self) -> list[tuple[str, str]]:
         """Return a list of (src_code, tgt_code) for all installed argostranslate packages."""
         try:
-            import argostranslate.translate as at
-            pairs = []
-            for lang in at.get_installed_languages():
-                for t in lang.translations_from:
-                    pairs.append((lang.code, t.to_lang.code))
-            return pairs
+            import argostranslate.package as ap
+            return [(p.from_code, p.to_code) for p in ap.get_installed_packages()]
         except Exception:
             return []
 
@@ -2067,7 +2127,10 @@ class ControlPanel:
                                 deleted = True
                         except Exception:
                             continue
-                self._argos_cache.pop((src, tgt), None)
+                if deleted:
+                    import argostranslate.translate as at
+                    at.get_installed_languages.cache_clear()
+                    self.root.after(0, self._rebuild_route_cache)
                 self.root.after(0, lambda: on_done(deleted))
             except Exception as e:
                 print(f"[argos-delete] {e}")
@@ -2366,12 +2429,10 @@ class ControlPanel:
                 src = ALL_LANGUAGES.get(self._translation["user_source"].get())
                 tgt = ALL_LANGUAGES.get(self._translation["user_target"].get())
                 if src and tgt and src != tgt:
-                    translator = self._argos_cache.get((src, tgt))
-                    if translator:
-                        try:
-                            result = translator.translate(text) or text
-                        except Exception:
-                            pass
+                    try:
+                        result = self._translate_text(text, src, tgt)
+                    except Exception:
+                        pass
             self._send_to_samp(result)
 
         threading.Thread(target=_worker, daemon=True, name="samp-send").start()
@@ -2425,9 +2486,8 @@ class ControlPanel:
     def _apply_startup_config(self) -> None:
         """Restore the active preset from the last session on startup."""
         self._config.apply(self._config.active_preset, self, None)
-        # The trace_add on 'enabled'/'user_enabled' fires during apply() before
-        # source/target are set, so _prewarm_translator gets _PLACEHOLDER values
-        # and does nothing. Explicitly call it now that all settings are loaded.
+        # trace_add fires during apply() before source/target are set; call
+        # _on_translation_toggle now so _rebuild_route_cache runs with full settings.
         self._on_translation_toggle()
 
     def _open_presets_dialog(self) -> None:
