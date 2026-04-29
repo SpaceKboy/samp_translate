@@ -41,6 +41,8 @@ main.py  →  ControlPanel (tk.Tk root, always-on-top menu)
 
 **`main.py`** — `ControlPanel` (tk.Tk): main window with status indicator and action buttons. Hosts all dialog classes (ChatStyleDialog, FiltersDialog, TranslationDialog, ShortcutsDialog, PresetsDialog, …). Uses two `queue.Queue` objects for thread-safe communication between reader, translator, and UI.
 
+**`translation_engine.py`** — `TranslationEngine`: all argostranslate logic isolated from the UI. Manages package installation/deletion, BPE detection, and route cache. `ControlPanel` calls only high-level methods (`translate`, `install_packages`, `rebuild_route_cache`, etc.) and never imports argostranslate directly.
+
 **`samp_chat.py`** — `SampChatReader` + `find_chat_array()`: reads `gta_sa.exe` memory via `pymem`. The chat buffer is heap-allocated (address changes every session), so `find_chat_array` locates it at runtime using a raw-byte regex signature.
 
 **`window_overlay.py`** — `SelectorDialog` + `ChatOverlay`: Win32 window enumeration dialog and transparent overlay. Click-through is achieved by subclassing the window procedure to return `HTTRANSPARENT` for `WM_NCHITTEST`.
@@ -72,8 +74,12 @@ Signature used to locate the array:
 - The Tcl/Tk path fix (`_fix_tcl_paths`) runs at the top of `window_overlay.py` and `main.py` because the venv does not inherit TCL/TK paths from the base Python installation.
 - VS Code uses `.vscode/settings.json` to point to the `.venv` interpreter (required for Pylance to resolve `win32api`, `win32gui`, etc. via `pywin32-stubs`).
 - Translation uses a **producer-consumer** pattern across two queues (`_raw_queue`, `_display_queue`) so memory reading, translation, and UI updates never block each other.
-- `_argos_cache` maps `(src_code, tgt_code)` → `list[translator]` (1, 2, or 3 elements). Built atomically by `_rebuild_route_cache()` in a background thread whenever packages are installed/deleted or translation is enabled.
+- `TranslationEngine._route_cache` maps `(src_code, tgt_code)` → `list[translator]` (1, 2, or 3 elements). Replaced atomically by `rebuild_route_cache()` in a background thread whenever packages are installed/deleted or translation is enabled.
 - Routes support up to **three hops** (e.g. `es→pt→en→it`) to work around broken or missing direct packages. The builder runs three passes: direct → two-hop → three-hop; shorter routes always take priority.
+- `TranslationEngine` uses a `_rebuild_pending` flag so that if a rebuild is requested while one is already running, a follow-up rebuild is queued — no request is ever silently dropped.
+- `rebuild_route_cache(on_rebuilt=None)` accepts an optional callback fired on the UI thread after the cache is ready. `install_packages` uses this to call `on_done(True)` only after `is_installed()` returns correct results.
+- Package downloads always install **both directions** (e.g. `es→pt` + `pt→es`) so Server Chat and User Chat both work after a single download action.
+- When the direct pair is unavailable or BPE-broken, `install_packages` automatically tries bridge languages in priority order (`pt`, `en`, `fr`, `de`, …) until a two-hop SentencePiece route is found.
 
 #### Keyboard hooks
 
@@ -83,11 +89,15 @@ Signature used to locate the array:
 
 #### Translation startup
 
-- `_apply_startup_config()` calls `_on_translation_toggle()` explicitly **after** `config.apply()` returns. The `trace_add("write", …)` callback on `_translation["enabled"]` fires during `apply()` before `source`/`target` are set, so the cache rebuild triggered by the callback is a no-op (translation not yet enabled with valid languages). The explicit post-apply call runs with all settings populated and actually starts `_rebuild_route_cache()`.
+- `_apply_startup_config()` calls `_on_translation_toggle()` explicitly **after** `config.apply()` returns. The `trace_add("write", …)` callback on `_translation["enabled"]` fires during `apply()` before `source`/`target` are set, so the cache rebuild triggered by the callback is a no-op (translation not yet enabled with valid languages). The explicit post-apply call runs with all settings populated and actually starts `engine.rebuild_route_cache()`.
 
 #### BPE package detection
 
-- Some argostranslate packages (e.g. `es→en` v1.9) use BPE vocabulary format (`@@`-suffix tokens in `shared_vocabulary.json`), which is incompatible with ctranslate2 v4 and produces infinite-loop garbled output. `_rebuild_route_cache()` inspects every installed package's vocabulary file and excludes BPE packages from all routes (direct and multi-hop). Detection: count `@@`-suffix tokens vs `▁` (U+2581) SentencePiece tokens; if BPE count exceeds SentencePiece count the package is broken.
+- Some argostranslate packages (e.g. `es→en` v1.9) use BPE vocabulary format (`@@`-suffix tokens in `shared_vocabulary.json`), which is incompatible with ctranslate2 v4 and produces infinite-loop garbled output.
+- **Pre-install check (`_is_package_bpe`):** before calling `ap.install_from_path()`, the downloaded zip is opened and `shared_vocabulary.json` is inspected. If BPE token count exceeds SentencePiece token count (`▁` U+2581), the zip is discarded without being installed. BPE packages therefore never reach disk.
+- **Post-install scan (`_detect_broken`):** `rebuild_route_cache()` also scans already-installed packages and excludes any BPE ones from routes. This covers packages installed before the pre-install check was in place.
+- `get_broken_pairs()` returns the set of on-disk BPE packages; `TranslationDialog` displays them in red with a `(broken)` label.
+- `at.get_installed_languages.cache_clear()` is called **inside** the rebuild worker, not in the caller, to guarantee the `lru_cache` is fresh at the moment it is actually used.
 
 #### Presets
 

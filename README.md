@@ -75,22 +75,29 @@ pip install -r requirements.txt
 ## Architecture
 
 ```
-main.py          ControlPanel (tkinter Tk root)
-                 ├── SelectorDialog    window picker
-                 ├── ChatOverlay       transparent Toplevel
-                 └── background threads:
-                     ├── samp-chat-reader   → _raw_queue
-                     └── samp-translator    → _display_queue
-                         └── _drain_queue() via after()
+main.py               ControlPanel (tkinter Tk root)
+                      ├── SelectorDialog       window picker
+                      ├── ChatOverlay          transparent Toplevel
+                      ├── TranslationEngine    package management + route cache
+                      └── background threads:
+                          ├── samp-chat-reader   → _raw_queue
+                          └── samp-translator    → _display_queue
+                              └── _drain_queue() via after()
 
-samp_chat.py     SampChatReader + find_chat_array()
-                 Reads gta_sa.exe memory via pymem
-                 Locates CChatLine[100] by signature scan
+translation_engine.py TranslationEngine
+                      ├── rebuild_route_cache()  builds multi-hop translator map
+                      ├── translate()            applies route to a string
+                      ├── install_packages()     download + BPE check + install
+                      └── delete_package()       removes package from disk
 
-window_overlay.py  SelectorDialog + ChatOverlay
-                   Transparent Win32 overlay (WM_NCHITTEST → HTTRANSPARENT)
+samp_chat.py          SampChatReader + find_chat_array()
+                      Reads gta_sa.exe memory via pymem
+                      Locates CChatLine[100] by signature scan
 
-config.py        ConfigManager — JSON presets in %APPDATA%\SAMP-Translate\
+window_overlay.py     SelectorDialog + ChatOverlay
+                      Transparent Win32 overlay (WM_NCHITTEST → HTTRANSPARENT)
+
+config.py             ConfigManager — JSON presets in %APPDATA%\SAMP-Translate\
 ```
 
 ### CChatLine struct (SA-MP 0.3.DL-R1)
@@ -115,13 +122,14 @@ Total entry size: **252 bytes (0xFC)**. The array holds **100 entries** as a rin
 
 ```
 SAMP-Translate/
-├── main.py            Application entry point and UI dialogs
-├── samp_chat.py       SA-MP memory reader
-├── window_overlay.py  Transparent overlay and window selector
-├── config.py          Preset persistence (JSON)
-├── requirements.txt   Python dependencies
+├── main.py               Application entry point and UI dialogs
+├── translation_engine.py Offline translation — package management and route cache
+├── samp_chat.py          SA-MP memory reader
+├── window_overlay.py     Transparent overlay and window selector
+├── config.py             Preset persistence (JSON)
+├── requirements.txt      Python dependencies
 └── .vscode/
-    └── settings.json  VS Code interpreter path (points to .venv)
+    └── settings.json     VS Code interpreter path (points to .venv)
 ```
 
 ---
