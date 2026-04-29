@@ -13,3 +13,10 @@ __pycache__/
 # OS-generated files
 Thumbs.db
 .DS_Store
+
+# Build output
+dist/
+build/
+
+# Claude Code internal files
+.claude/
